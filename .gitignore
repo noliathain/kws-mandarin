@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# uv
+# (uv.lock IS committed — do not ignore it)
+
+# Data & artifacts (never commit corpora or checkpoints).
+# Anchored to repo root so the source package src/kws_mandarin/data/ is NOT ignored.
+/data/
+checkpoints/
+runs/
+*.wav
+*.flac
+*.pt
+*.ckpt
+*.onnx
+*.tflite
+
+# Notebooks / scratch
+.ipynb_checkpoints/
+scratch/
