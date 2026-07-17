@@ -55,6 +55,8 @@ See [docs/decisions.md](docs/decisions.md) for the full rationale (ADR-style).
 | Open-vocab keyword decoder        | ⬜ planned |
 | MUSAN/RIR augmentation            | ⬜ next (corpora downloader ready) |
 | Data prep (AISHELL-1 manifests)   | ✅ implemented + tested |
+| Data-quality validation (fail-loud) | ✅ implemented + tested |
+| Dataset + collate + CTC training step | ✅ implemented + tested |
 
 ## Setup
 
