@@ -49,14 +49,17 @@ See [docs/decisions.md](docs/decisions.md) for the full rationale (ADR-style).
 |-----------------------------------|--------------|
 | Tonal-pinyin tokenizer            | ✅ implemented + tested |
 | FRR@FAH / DET evaluation harness  | ✅ implemented + tested |
-| Log-mel frontend                  | ⬜ next |
-| BC-ResNet encoder + SubSpectralNorm | ⬜ next |
-| CTC loss + wildcard-arc training  | ⬜ planned |
-| Open-vocab keyword decoder        | ⬜ planned |
-| MUSAN/RIR augmentation            | ⬜ next (corpora downloader ready) |
+| Log-mel frontend                  | ✅ implemented + tested |
+| BC-ResNet encoder + SubSpectralNorm | ✅ implemented + tested |
+| CTC loss (plain)                  | ✅ implemented + tested |
+| NTC-style wildcard-arc CTC        | ⬜ planned (next robustness tier) |
+| Open-vocab keyword decoder        | ✅ implemented + tested |
+| MUSAN/RIR + SpecAugment augmentation | ✅ implemented + tested |
 | Data prep (AISHELL-1 manifests)   | ✅ implemented + tested |
 | Data-quality validation (fail-loud) | ✅ implemented + tested |
 | Dataset + collate + CTC training step | ✅ implemented + tested |
+| DDP trainer (AMP, ckpt/resume, EMA, FRR@FAH val) | ✅ implemented + tested |
+| LLM tone-confusable hard negatives | ⬜ planned |
 
 ## Setup
 
@@ -65,6 +68,25 @@ uv sync --extra dev          # light env: tokenizer + eval + tests, no torch
 uv run pytest                # run the test suite
 uv sync --extra train        # add torch/torchaudio when building the model
 ```
+
+## Training
+
+```bash
+# 1. corpora (AISHELL-1 + MUSAN + RIRs) -> $KWS_DATA_ROOT
+KWS_DATA_ROOT=/teamspace/lightning_storage/kws-mandarin scripts/download_data.sh all
+
+# 2. manifests (96-way) + fail-loud quality gate
+uv run python -m kws_mandarin.data.prepare_aishell --aishell-root <root>/corpora/aishell1/data_aishell --out <root>/manifests --workers $(nproc)
+uv run python -m kws_mandarin.data.validate --manifests <root>/manifests --deep --workers $(nproc)
+
+# 3. train on 8 GPUs (DDP)
+uv sync --extra train
+torchrun --standalone --nproc_per_node=8 -m kws_mandarin.train --config configs/base.yaml
+```
+
+Config lives in [configs/base.yaml](configs/base.yaml). Validation reports token error
+rate and **FRR@{0.5,1.0} FA/hr** on held-out keywords; best/latest checkpoints and full
+resume state are written to `ckpt_dir`.
 
 ## Layout
 

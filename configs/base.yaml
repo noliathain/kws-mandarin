@@ -1,0 +1,52 @@
+# Base training config for AISHELL-1 (8-GPU DDP). See src/kws_mandarin/config.py.
+model:
+  scale: 3.0            # BC-ResNet width; ~44K encoder params
+  n_mels: 40
+  causal: true          # streaming, ~200 ms budget
+  ssn_bands: 5
+  dropout: 0.1
+  tone_mode: final      # initial + toned-final (~280 units)
+
+data:
+  train_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_train.jsonl
+  dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
+  sample_rate: 16000
+  batch_size: 64        # per GPU -> 512 global on 8 GPUs
+  num_workers: 8
+  max_duration_s: 16.0
+
+aug:
+  enabled: true
+  musan_dir: /teamspace/lightning_storage/kws-mandarin/corpora/musan
+  rir_dir: /teamspace/lightning_storage/kws-mandarin/corpora/rirs/RIRS_NOISES
+  snr_db_min: 0.0       # multi-SNR down to 0 dB
+  snr_db_max: 20.0
+  p_noise: 0.6
+  p_rir: 0.5
+  p_speed: 0.5
+  p_gain: 0.5
+  specaug_enabled: true
+  specaug_freq_mask: 8
+  specaug_n_freq: 2
+  specaug_time_mask: 25
+  specaug_n_time: 2
+
+optim:
+  lr: 0.003
+  weight_decay: 0.0001
+  beta1: 0.9
+  beta2: 0.98
+  grad_clip: 5.0
+  warmup_steps: 2000
+  max_steps: 120000
+  min_lr_ratio: 0.01
+
+seed: 1337
+precision: bf16
+ema_decay: 0.999
+log_every: 50
+val_every: 2000
+ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/base
+keep_last: 3
+val_max_utts: 2000
+val_keywords: [中国, 经济, 发展, 公司, 市场, 政府, 记者, 工作, 问题, 社会]

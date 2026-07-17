@@ -25,11 +25,13 @@ class KWSModel(nn.Module):
         ssn_bands: int = 5,
         dropout: float = 0.1,
         blank_id: int = 0,
+        spec_augment: nn.Module | None = None,
     ):
         super().__init__()
         self.blank_id = blank_id
         self.vocab_size = vocab_size
         self.frontend = LogMelFrontend(n_mels=n_mels)
+        self.spec_augment = spec_augment  # applied after frontend; no-op in eval mode
         self.encoder = BCResNetEncoder(
             n_mels=n_mels, scale=scale, ssn_bands=ssn_bands, causal=causal, dropout=dropout
         )
@@ -38,6 +40,8 @@ class KWSModel(nn.Module):
     def forward(self, wav: Tensor) -> Tensor:
         """``wav`` (B, N) or (B, 1, N) -> logits (B, T, V)."""
         feats = self.frontend(wav)          # (B, n_mels, T)
+        if self.spec_augment is not None:
+            feats = self.spec_augment(feats)  # train-time masking (identity in eval)
         enc = self.encoder(feats)           # (B, T, D)
         return self.head(enc)               # (B, T, V)
 
