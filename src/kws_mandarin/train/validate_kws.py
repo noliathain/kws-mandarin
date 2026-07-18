@@ -15,7 +15,7 @@ import torch
 from torch import Tensor
 
 from ..data.manifest import Utterance
-from ..decode import CTCKeywordSpotter
+from ..decode import CTCKeywordSpotter, NTCKeywordSpotter
 from ..eval import summary
 from ..tokenizer import PinyinTokenizer
 
@@ -68,10 +68,15 @@ def run_validation(
     batch_size: int = 32,
     max_utts: int | None = None,
     target_fahs: tuple[float, ...] = (0.5, 1.0),
+    use_ntc: bool = False,
+    ntc_lambda: float = 2.0,
 ) -> dict:
     model.eval()
     blank = tokenizer.blank_id
-    spotter = CTCKeywordSpotter(blank=blank)
+    spotter = (
+        NTCKeywordSpotter(blank=blank, lambda_ins=ntc_lambda, lambda_mask=ntc_lambda)
+        if use_ntc else CTCKeywordSpotter(blank=blank)
+    )
     kw_ids = {kw: tokenizer.encode(kw) for kw in keywords}
 
     if max_utts is not None:

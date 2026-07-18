@@ -85,6 +85,8 @@ class TrainConfig:
     # keywords (Han strings) used for FRR@FAH validation during training
     val_keywords: list[str] = field(default_factory=list)
     val_max_utts: int = 2000       # cap dev utts scored per validation for speed
+    val_use_ntc: bool = False      # score validation with the NTC noise-aware spotter
+    ntc_lambda: float = 2.0        # wildcard-arc penalty (lower = more noise tolerance)
 
     # -- (de)serialization -------------------------------------------------------------
     @classmethod

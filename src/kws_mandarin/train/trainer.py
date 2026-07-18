@@ -242,6 +242,7 @@ class Trainer:
             metrics = run_validation(
                 eval_model, self.dev_utts, self.tokenizer, self.cfg.val_keywords,
                 self.device, sample_rate=self.cfg.data.sample_rate, max_utts=self.cfg.val_max_utts,
+                use_ntc=self.cfg.val_use_ntc, ntc_lambda=self.cfg.ntc_lambda,
             )
             print(f"[val] step {self.step} " +
                   " ".join(f"{k}={v:.4f}" for k, v in metrics.items()), flush=True)

@@ -107,6 +107,66 @@ def ctc_keyword_score(
     return best / u if normalize else best
 
 
+def _wild_logprob(log_probs: Tensor, blank: int) -> Tensor:
+    """Per-frame wildcard/noise score = log of the non-blank probability mass = log(1 - p_blank).
+
+    High when a frame carries token-like content (speech or noise) rather than silence — the
+    frames where a low-SNR model tends to emit spurious tokens. This is what the NTC wildcard
+    arcs absorb.
+    """
+    p_blank = log_probs[:, blank].exp().clamp(max=1.0 - 1e-6)
+    return torch.log1p(-p_blank).clamp(min=-30.0)
+
+
+def ntc_keyword_score(
+    log_probs: Tensor,
+    keyword_ids: Sequence[int],
+    blank: int = 0,
+    lambda_ins: float = 2.0,
+    lambda_mask: float = 2.0,
+    normalize: bool = True,
+) -> Tensor:
+    """NTC-style noise-aware keyword score: CTC keyword-filler + wildcard arcs.
+
+    Realizes NTC-KWS's two robustness arcs directly in the CTC forward recursion (no WFST/k2,
+    per D7), by making a *wildcard/noise* emission available at every state at a penalty:
+
+    * **self-loop noise arc** (insertion): at a blank state the frame may be emitted as blank
+      *or* as noise (``_wild_logprob`` − ``lambda_ins``), so spurious tokens inserted between
+      keyword units are absorbed instead of tanking the alignment.
+    * **bypass arc** (masking): at a keyword-token state the frame may be the token *or* noise
+      (``_wild_logprob`` − ``lambda_mask``), so a unit masked by noise can still be traversed.
+
+    As ``lambda_* → ∞`` the wildcard vanishes and this reduces exactly to ``ctc_keyword_score``.
+    Larger penalties = less noise tolerance. Returns a monotone detection score.
+    """
+    if log_probs.dim() != 2:
+        raise ValueError(f"expected (T, V) log-probs, got {tuple(log_probs.shape)}")
+    ext, skip = _extended(keyword_ids, blank, log_probs.device)
+    s = ext.numel()
+    u = len(keyword_ids)
+    t_len = log_probs.shape[0]
+    is_blank = ext.eq(blank)
+    wild = _wild_logprob(log_probs, blank)  # (T,)
+
+    start_boost = log_probs.new_full((s,), _NEG)
+    start_boost[0] = 0.0
+    if s > 1:
+        start_boost[1] = 0.0
+
+    alpha = log_probs.new_full((s,), _NEG)
+    best = log_probs.new_full((), _NEG)
+    for t in range(t_len):
+        base = log_probs[t].index_select(0, ext)                      # (S,) real emission
+        pen = torch.where(is_blank, wild[t] - lambda_ins, wild[t] - lambda_mask)
+        emit = torch.logaddexp(base, pen)                             # token/blank OR wildcard
+        trans = _transition(alpha, skip) if t > 0 else log_probs.new_full((s,), _NEG)
+        alpha = torch.logaddexp(trans, start_boost) + emit
+        end = torch.logaddexp(alpha[-1], alpha[-2])
+        best = torch.maximum(best, end)
+    return best / u if normalize else best
+
+
 class BaseKeywordSpotter(ABC):
     """Stable open-vocab decoder interface. A TDT decoder implements the same ``score``."""
 
@@ -123,3 +183,20 @@ class CTCKeywordSpotter(BaseKeywordSpotter):
     def score(self, log_probs: Tensor, keyword_ids: Sequence[int]) -> float:
         with torch.no_grad():
             return float(ctc_keyword_score(log_probs, keyword_ids, self.blank, self.normalize))
+
+
+class NTCKeywordSpotter(BaseKeywordSpotter):
+    """Noise-aware NTC keyword spotter (wildcard arcs). Drop-in for CTCKeywordSpotter."""
+
+    def __init__(self, blank: int = 0, lambda_ins: float = 2.0, lambda_mask: float = 2.0,
+                 normalize: bool = True):
+        self.blank = blank
+        self.lambda_ins = lambda_ins
+        self.lambda_mask = lambda_mask
+        self.normalize = normalize
+
+    def score(self, log_probs: Tensor, keyword_ids: Sequence[int]) -> float:
+        with torch.no_grad():
+            return float(ntc_keyword_score(
+                log_probs, keyword_ids, self.blank, self.lambda_ins, self.lambda_mask, self.normalize
+            ))

@@ -52,7 +52,7 @@ See [docs/decisions.md](docs/decisions.md) for the full rationale (ADR-style).
 | Log-mel frontend                  | ✅ implemented + tested |
 | BC-ResNet encoder + SubSpectralNorm | ✅ implemented + tested |
 | CTC loss (plain)                  | ✅ implemented + tested |
-| NTC-style wildcard-arc CTC        | ⬜ planned (next robustness tier) |
+| NTC-style wildcard-arc CTC (noise-aware decode) | ✅ implemented + tested |
 | Open-vocab keyword decoder        | ✅ implemented + tested |
 | MUSAN/RIR + SpecAugment augmentation | ✅ implemented + tested |
 | Data prep (AISHELL-1 manifests)   | ✅ implemented + tested |
