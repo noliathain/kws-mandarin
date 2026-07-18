@@ -10,6 +10,9 @@ model:
 data:
   train_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_train.jsonl
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
+  # FUSE/S3-robust: stream training from shards (built by `python -m kws_mandarin.data.shard`)
+  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
+  shuffle_buffer: 2000
   sample_rate: 16000
   batch_size: 64        # per GPU -> 512 global on 8 GPUs
   num_workers: 8
