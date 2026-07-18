@@ -1,4 +1,5 @@
 2
+5
 a1
 a2
 a3
@@ -51,6 +52,7 @@ eng5
 er2
 er3
 er4
+er5
 f
 g
 h
@@ -63,6 +65,7 @@ ia1
 ia2
 ia3
 ia4
+ia5
 ian1
 ian2
 ian3
@@ -82,6 +85,7 @@ ie1
 ie2
 ie3
 ie4
+ie5
 in1
 in2
 in3
@@ -96,10 +100,12 @@ iong1
 iong2
 iong3
 iong4
+iong5
 iu1
 iu2
 iu3
 iu4
+iu5
 j
 k
 l
@@ -136,10 +142,12 @@ ua1
 ua2
 ua3
 ua4
+ua5
 uai1
 uai2
 uai3
 uai4
+uai5
 uan1
 uan2
 uan3
@@ -154,6 +162,7 @@ ue1
 ue2
 ue3
 ue4
+ue5
 ui1
 ui2
 ui3
@@ -172,7 +181,9 @@ uo5
 v2
 v3
 v4
+v5
 ve4
+ve5
 wa1
 wa2
 wa3
@@ -181,14 +192,17 @@ wa5
 wai1
 wai3
 wai4
+wai5
 wan1
 wan2
 wan3
 wan4
+wan5
 wang1
 wang2
 wang3
 wang4
+wang5
 wei1
 wei2
 wei3
@@ -202,9 +216,11 @@ wen5
 weng1
 weng3
 weng4
+weng5
 wo1
 wo3
 wo4
+wo5
 wu1
 wu2
 wu3
@@ -220,6 +236,7 @@ yan1
 yan2
 yan3
 yan4
+yan5
 yang1
 yang2
 yang3
@@ -229,6 +246,7 @@ yao1
 yao2
 yao3
 yao4
+yao5
 ye1
 ye2
 ye3
@@ -238,6 +256,7 @@ yi1
 yi2
 yi3
 yi4
+yi5
 yin1
 yin2
 yin3
@@ -247,11 +266,14 @@ ying1
 ying2
 ying3
 ying4
+ying5
 yo1
+yo5
 yong1
 yong2
 yong3
 yong4
+yong5
 you1
 you2
 you3
@@ -266,9 +288,11 @@ yuan1
 yuan2
 yuan3
 yuan4
+yuan5
 yue1
 yue3
 yue4
+yue5
 yun1
 yun2
 yun3

@@ -54,6 +54,16 @@ def test_no_unk_on_common_text():
         assert tok.unk_id not in ids, f"<unk> produced in mode {mode.value}"
 
 
+def test_neutral_tone_coverage():
+    # Regression: contextual neutral tone (tone 5) must be in-vocab. Isolated-character
+    # citation forms give 儿=er2 and 宜=yi2, but erhua and 便宜 need er5/yi5 — these were
+    # missing until the vocab generator added tone-5 variants for every base.
+    tok = PinyinTokenizer()
+    assert "er5" in tok.unit_to_id and "yi5" in tok.unit_to_id
+    for text in ("便宜", "这儿", "一点儿", "他们以挑刺儿的态度"):
+        assert tok.unk_id not in tok.encode(text), f"<unk> for {text}: {tok.units_for_text(text)}"
+
+
 def test_vocab_sizes_are_sane():
     sizes = {m: PinyinTokenizer(m).vocab_size for m in ToneMode}
     # separate (initials+finals+tones) << final (initials + toned-finals) << syllable

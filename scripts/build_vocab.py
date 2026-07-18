@@ -43,7 +43,13 @@ def all_readings() -> set[str]:
 def main() -> None:
     _VOCAB_DIR.mkdir(parents=True, exist_ok=True)
     readings = all_readings()
-    print(f"collected {len(readings)} distinct toned syllables")
+    # Neutral tone (5) attaches to almost any syllable in phrase context but is largely
+    # absent from isolated-character citation forms swept above (e.g. 儿 alone is er2, but
+    # er5 in erhua; 宜 alone is yi2, but yi5 in 便宜). Add a tone-5 variant of every base
+    # syllable so these contextual readings are always in-vocab (keywords included).
+    bases = {syl[:-1] if syl[-1].isdigit() else syl for syl in readings}
+    readings |= {b + "5" for b in bases}
+    print(f"{len(readings)} toned syllables (incl. neutral-tone variants)")
     for mode in ToneMode:
         units: set[str] = set()
         for syl in readings:

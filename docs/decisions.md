@@ -20,7 +20,7 @@ confusable hard negatives — not on a bigger encoder.
 most important idea in the repo.
 
 ## D3 — Units: compositional tonal-pinyin, default `initial + toned-final`
-**Decision.** Default `FINAL` mode (~280 units). `SEPARATE` (~85) and `SYLLABLE` (~1380)
+**Decision.** Default `FINAL` mode (~300 units). `SEPARATE` (~85) and `SYLLABLE` (~1700)
 are configurable for ablation. See [architecture.md](architecture.md).
 **Why.** Open vocabulary requires a *compositional* inventory so any keyword is expressible.
 `FINAL` balances data efficiency against keeping tone attached to its host final (tone is

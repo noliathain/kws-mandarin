@@ -26,9 +26,9 @@ compositional. We derive it from tonal pinyin at one of three granularities:
 
 | Mode       | Example `中` | Inventory | Trade-off |
 |------------|-------------|-----------|-----------|
-| `FINAL` (default) | `zh` + `ong1` | ~280 | tone stays on its final; good data efficiency |
+| `FINAL` (default) | `zh` + `ong1` | ~300 | tone stays on its final; good data efficiency |
 | `SEPARATE` | `zh` + `ong` + `1` | ~85 | smallest; tone detached from final (less natural) |
-| `SYLLABLE` | `zhong1` | ~1380 | matches CRNN-CTC precedent; large softmax |
+| `SYLLABLE` | `zhong1` | ~1700 | matches CRNN-CTC precedent; large softmax |
 
 Splitting a TONE3 syllable into initial/final/tone is a pure string operation, so
 pypinyin's phrase-level heteronym (多音字) disambiguation is preserved. The inventory is

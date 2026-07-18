@@ -23,8 +23,8 @@ audio ─► log-mel ─► BC-ResNet encoder ─► CTC head over tonal-pinyin 
 - **Backbone:** BC-ResNet (broadcasted residual blocks + SubSpectralNorm), scale 3–6.
   Chosen for its proven int8 quantization / export path, not for raw accuracy.
 - **Units:** tonal-pinyin, **compositional so any keyword is expressible** — default
-  `initial + toned-final` (~280 units). Configurable to `separate-tone` (~85) or full
-  `syllable` (~1380) for ablation. See [docs/architecture.md](docs/architecture.md).
+  `initial + toned-final` (~300 units). Configurable to `separate-tone` (~85) or full
+  `syllable` (~1700) for ablation. See [docs/architecture.md](docs/architecture.md).
 - **Robustness:** NTC-style wildcard-arc CTC (self-loop = noise insertion, bypass =
   masking), multi-SNR MUSAN/RIR augmentation, LLM-generated tone-confusable hard negatives.
 - **Open vocabulary:** keywords are token sequences resolved at runtime. Plain CTC keyword
