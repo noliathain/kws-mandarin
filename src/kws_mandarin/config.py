@@ -58,6 +58,10 @@ class OptimConfig:
 class DataConfig:
     train_manifest: str = "/teamspace/lightning_storage/kws-mandarin/manifests/aishell1_train.jsonl"
     dev_manifest: str = "/teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl"
+    # If set (dir or glob of .tar), train from WebDataset shards instead of the manifest —
+    # FUSE/S3-friendly. See src/kws_mandarin/data/shard.py.
+    train_shards: str | None = None
+    shuffle_buffer: int = 2000
     sample_rate: int = 16000
     batch_size: int = 128
     num_workers: int = 8

@@ -14,6 +14,7 @@ Launch (8 GPUs):
 from __future__ import annotations
 
 import copy
+import glob
 import os
 import time
 from pathlib import Path
@@ -22,10 +23,10 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 
 from ..config import TrainConfig
-from ..data import KWSDataset, SpecAugment, WaveformAugment, collate_kws
+from ..data import KWSDataset, ShardDataset, SpecAugment, WaveformAugment, collate_kws
 from ..data.manifest import read_manifest
 from ..loss import CTCLoss
 from ..models import KWSModel
@@ -113,20 +114,34 @@ class Trainer:
             seed=self.cfg.seed + self.rank,
         )
 
+    def _make_train_dataset(self):
+        d = self.cfg.data
+        augment = self._make_augment()
+        if d.train_shards:
+            shards = sorted(glob.glob(d.train_shards))
+            if not shards:  # allow passing a directory
+                shards = sorted(glob.glob(str(Path(d.train_shards) / "*.tar")))
+            if not shards:
+                raise FileNotFoundError(f"no shards matched: {d.train_shards}")
+            return ShardDataset(
+                shards, self.tokenizer, sample_rate=d.sample_rate, augment=augment,
+                shuffle_buffer=d.shuffle_buffer, seed=self.cfg.seed,
+            )
+        return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
+
     def _build_data(self, train_dataset, dev_utts) -> None:
         if train_dataset is None:
-            train_dataset = KWSDataset(
-                self.cfg.data.train_manifest, self.tokenizer,
-                sample_rate=self.cfg.data.sample_rate, augment=self._make_augment(),
-            )
+            train_dataset = self._make_train_dataset()
         self.train_dataset = train_dataset
 
-        sampler = DistributedSampler(train_dataset) if self.distributed else None
+        # IterableDataset (shards) partitions internally — no DistributedSampler, no shuffle flag.
+        self.iterable = isinstance(train_dataset, IterableDataset)
+        sampler = DistributedSampler(train_dataset) if (self.distributed and not self.iterable) else None
         self.sampler = sampler
         self.loader = DataLoader(
             train_dataset,
             batch_size=self.cfg.data.batch_size,
-            shuffle=(sampler is None),
+            shuffle=(sampler is None and not self.iterable),
             sampler=sampler,
             num_workers=self.cfg.data.num_workers,
             collate_fn=collate_kws,
@@ -180,6 +195,8 @@ class Trainer:
         while self.step < max_steps:
             if self.sampler is not None:
                 self.sampler.set_epoch(epoch)
+            elif hasattr(self.train_dataset, "set_epoch"):
+                self.train_dataset.set_epoch(epoch)  # reshuffle shards each epoch
             for batch in self.loader:
                 if self.step >= max_steps:
                     break

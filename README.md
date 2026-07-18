@@ -59,6 +59,7 @@ See [docs/decisions.md](docs/decisions.md) for the full rationale (ADR-style).
 | Data-quality validation (fail-loud) | ✅ implemented + tested |
 | Dataset + collate + CTC training step | ✅ implemented + tested |
 | DDP trainer (AMP, ckpt/resume, EMA, FRR@FAH val) | ✅ implemented + tested |
+| WebDataset shards (FUSE/S3-robust I/O) | ✅ implemented + tested |
 | LLM tone-confusable hard negatives | ⬜ planned |
 
 ## Setup
@@ -79,10 +80,17 @@ KWS_DATA_ROOT=/teamspace/lightning_storage/kws-mandarin scripts/download_data.sh
 uv run python -m kws_mandarin.data.prepare_aishell --aishell-root <root>/corpora/aishell1/data_aishell --out <root>/manifests --workers $(nproc)
 uv run python -m kws_mandarin.data.validate --manifests <root>/manifests --deep --workers $(nproc)
 
-# 3. train on 8 GPUs (DDP)
+# 3. pack audio into WebDataset shards (FUSE/S3-friendly; avoids 141k small-file reads)
+uv run python -m kws_mandarin.data.shard --manifest <root>/manifests/aishell1_train.jsonl --out <root>/shards/train --num-shards 256 --workers $(nproc)
+
+# 4. train on 8 GPUs (DDP)  — set data.train_shards to the shard glob in the config
 uv sync --extra train
 torchrun --standalone --nproc_per_node=8 -m kws_mandarin.train --config configs/base.yaml
 ```
+
+Set `data.train_shards: <root>/shards/train/*.tar` in the config to stream from shards; the
+`ShardDataset` partitions shards across DDP ranks and dataloader workers (no duplication) with
+a sample shuffle buffer. Leave it empty to read the manifest directly (fine for local disk).
 
 Config lives in [configs/base.yaml](configs/base.yaml). Validation reports token error
 rate and **FRR@{0.5,1.0} FA/hr** on held-out keywords; best/latest checkpoints and full
