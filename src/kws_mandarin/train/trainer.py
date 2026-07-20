@@ -109,6 +109,7 @@ class Trainer:
             return None
         return WaveformAugment.from_dirs(
             a.musan_dir, a.rir_dir, sample_rate=self.cfg.data.sample_rate,
+            rir_pack=a.rir_pack,
             snr_db_range=(a.snr_db_min, a.snr_db_max),
             p_noise=a.p_noise, p_rir=a.p_rir, p_speed=a.p_speed, p_gain=a.p_gain,
             seed=self.cfg.seed + self.rank,

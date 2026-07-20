@@ -173,6 +173,7 @@ class WaveformAugment:
         rir_dir: str | None,
         sample_rate: int = 16000,
         seed: int | None = None,
+        rir_pack: str | None = None,
         **kwargs,
     ) -> "WaveformAugment":
         rng = random.Random(seed)
@@ -189,8 +190,16 @@ class WaveformAugment:
             noises = sorted(Path(musan_dir).rglob("*.wav"))
             if noises:
                 noise_sampler = lambda: _load(rng.choice(noises))  # noqa: E731
+
         rir_sampler = None
-        if rir_dir:
+        if rir_pack:
+            # FUSE-proof: RIRs live in RAM, no per-sample I/O.
+            from .rir_pack import load_rir_pack
+
+            rirs_mem = load_rir_pack(rir_pack, sample_rate=sample_rate)
+            if rirs_mem:
+                rir_sampler = lambda: rng.choice(rirs_mem)  # noqa: E731
+        elif rir_dir:
             rirs = sorted(Path(rir_dir).rglob("*.wav"))
             if rirs:
                 rir_sampler = lambda: _load(rng.choice(rirs))  # noqa: E731

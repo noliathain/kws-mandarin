@@ -21,7 +21,10 @@ data:
 aug:
   enabled: true
   musan_dir: /teamspace/lightning_storage/kws-mandarin/corpora/musan
-  rir_dir: /teamspace/lightning_storage/kws-mandarin/corpora/rirs/RIRS_NOISES
+  # Prefer the packed in-memory RIR file (FUSE-proof). Build it with:
+  #   python -m kws_mandarin.data.rir_pack --rir-dir <root>/corpora/rirs/RIRS_NOISES/real_rirs_isotropic_noises --out <root>/rirs.pt
+  rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
+  rir_dir: null
   snr_db_min: 0.0       # multi-SNR down to 0 dB
   snr_db_max: 20.0
   p_noise: 0.6
