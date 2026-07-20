@@ -60,7 +60,8 @@ See [docs/decisions.md](docs/decisions.md) for the full rationale (ADR-style).
 | Dataset + collate + CTC training step | ✅ implemented + tested |
 | DDP trainer (AMP, ckpt/resume, EMA, FRR@FAH val) | ✅ implemented + tested |
 | WebDataset shards (FUSE/S3-robust I/O) | ✅ implemented + tested |
-| LLM tone-confusable hard negatives | ⬜ planned |
+| Tone-confusable hard negatives (LLM-source drop-in) | ✅ implemented + tested |
+| RIR-packer (FUSE-proof in-memory reverb) | ✅ implemented + tested |
 
 ## Setup
 
