@@ -15,10 +15,11 @@ aug:
   rir_dir: null
   noise_pack: null         # MUSAN noise added later once packed
   rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
+  gpu_rir: true            # RIR reverb applied on-GPU (batched) in the training step
   snr_db_min: 0.0
   snr_db_max: 20.0
   p_noise: 0.0
-  p_rir: 0.0               # RIR fftconvolve is the costly aug; off so num_workers=0 stays fast
+  p_rir: 0.5               # fraction of each batch to reverb (on GPU)
   p_speed: 0.5
   p_gain: 0.5
   specaug_enabled: true

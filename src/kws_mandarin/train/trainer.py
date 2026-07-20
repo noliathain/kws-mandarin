@@ -28,7 +28,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 
 from ..config import TrainConfig
-from ..data import KWSDataset, ShardDataset, SpecAugment, WaveformAugment, collate_kws
+from ..data import KWSDataset, ShardDataset, SpecAugment, WaveformAugment, apply_rir_batch, collate_kws
 from ..data.manifest import read_manifest
 from ..loss import CTCLoss
 from ..models import KWSModel
@@ -56,6 +56,7 @@ class Trainer:
 
         self.tokenizer = tokenizer or PinyinTokenizer(ToneMode(config.model.tone_mode))
         self._build_model()
+        self._build_gpu_rirs()
         self._build_data(train_dataset, dev_utts)
         self._build_optim()
 
@@ -122,13 +123,29 @@ class Trainer:
         a = self.cfg.aug
         if not a.enabled:
             return None
+        # When RIR runs on the GPU, don't also do it per-clip on the CPU (rir_pack=None,p_rir=0).
         return WaveformAugment.from_dirs(
             a.musan_dir, a.rir_dir, sample_rate=self.cfg.data.sample_rate,
-            rir_pack=a.rir_pack, noise_pack=a.noise_pack,
+            rir_pack=(None if a.gpu_rir else a.rir_pack), noise_pack=a.noise_pack,
             snr_db_range=(a.snr_db_min, a.snr_db_max),
-            p_noise=a.p_noise, p_rir=a.p_rir, p_speed=a.p_speed, p_gain=a.p_gain,
+            p_noise=a.p_noise, p_rir=(0.0 if a.gpu_rir else a.p_rir),
+            p_speed=a.p_speed, p_gain=a.p_gain,
             seed=self.cfg.seed + self.rank,
         )
+
+    def _build_gpu_rirs(self) -> None:
+        """Load the RIR pack into one padded (N, Lmax) tensor on-device for batched GPU reverb."""
+        a = self.cfg.aug
+        self.gpu_rirs = None
+        if a.enabled and a.gpu_rir and a.rir_pack:
+            from ..data import load_rir_pack
+
+            rirs = load_rir_pack(a.rir_pack, sample_rate=self.cfg.data.sample_rate)
+            lmax = max(r.numel() for r in rirs)
+            padded = torch.zeros(len(rirs), lmax)
+            for i, r in enumerate(rirs):
+                padded[i, : r.numel()] = r
+            self.gpu_rirs = padded.to(self.device)
 
     def _make_train_dataset(self):
         d = self.cfg.data
@@ -197,8 +214,21 @@ class Trainer:
 
     # -- training ------------------------------------------------------------------------
 
+    def _gpu_augment(self, wavs: torch.Tensor) -> torch.Tensor:
+        """Batched GPU reverb: convolve a random p_rir fraction of the batch with random RIRs."""
+        if self.gpu_rirs is None or not self.raw_model.training:
+            return wavs
+        b = wavs.shape[0]
+        apply = torch.rand(b, device=wavs.device) < self.cfg.aug.p_rir
+        if not bool(apply.any()):
+            return wavs
+        idx = torch.randint(0, self.gpu_rirs.shape[0], (b,), device=wavs.device)
+        reverbed = apply_rir_batch(wavs, self.gpu_rirs[idx])
+        return torch.where(apply.unsqueeze(1), reverbed, wavs)
+
     def _loss_from_batch(self, batch) -> torch.Tensor:
         wavs = batch["wavs"].to(self.device, non_blocking=True)
+        wavs = self._gpu_augment(wavs)
         targets = batch["targets"].to(self.device, non_blocking=True)
         input_lengths = self.raw_model.output_lengths(batch["wav_lengths"])  # CPU
         logits = self.model(wavs)

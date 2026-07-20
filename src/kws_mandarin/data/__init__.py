@@ -1,4 +1,4 @@
-from .augment import SpecAugment, WaveformAugment, add_noise, apply_rir
+from .augment import SpecAugment, WaveformAugment, add_noise, apply_rir, apply_rir_batch
 from .dataset import KWSDataset, collate_kws
 from .manifest import Utterance, manifest_stats, read_manifest, write_manifest
 from .rir_pack import load_noise_pack, load_rir_pack, pack_noise, pack_rirs
@@ -14,6 +14,7 @@ __all__ = [
     "WaveformAugment",
     "add_noise",
     "apply_rir",
+    "apply_rir_batch",
     "collate_kws",
     "load_noise_pack",
     "load_rir_pack",

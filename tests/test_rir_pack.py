@@ -60,6 +60,24 @@ def test_pack_skips_overlong_non_rir_files(tmp_path):
     assert load_rir_pack(out)[0].numel() == 8000
 
 
+def test_apply_rir_batch_matches_per_clip():
+    # Batched GPU-style RIR must equal per-clip apply_rir for each item (correctness anchor).
+    from kws_mandarin.data import apply_rir, apply_rir_batch
+
+    torch.manual_seed(0)
+    B, T, L = 3, 8000, 200
+    wavs = torch.randn(B, T)
+    rirs = torch.zeros(B, L)
+    for b in range(B):
+        rirs[b, 3 + b] = 1.0                       # direct-path peak at a different tap per clip
+        rirs[b, 20:] = torch.randn(L - 20) * 0.05
+    batched = apply_rir_batch(wavs, rirs)
+    assert batched.shape == (B, T)
+    for b in range(B):
+        single = apply_rir(wavs[b], rirs[b])
+        assert torch.allclose(batched[b], single, atol=1e-4), f"clip {b} mismatch"
+
+
 def test_apply_rir_handles_long_rir_without_oom(tmp_path):
     # Regression: a multi-second RIR must not blow up memory (fftconvolve, not conv1d).
     from kws_mandarin.data.augment import apply_rir

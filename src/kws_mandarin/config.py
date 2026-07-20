@@ -30,6 +30,8 @@ class AugConfig:
     rir_dir: str | None = None
     rir_pack: str | None = None    # in-memory RIR .pt (preferred over rir_dir; FUSE-proof)
     noise_pack: str | None = None  # in-memory noise .pt (preferred over musan_dir; FUSE-proof)
+    gpu_rir: bool = False          # apply RIR reverb on the GPU (batched) in the training step
+                                   # instead of per-clip in dataloader workers (avoids worker IPC)
     snr_db_min: float = 0.0
     snr_db_max: float = 20.0
     p_noise: float = 0.6

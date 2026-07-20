@@ -78,6 +78,29 @@ def apply_rir(wav: Tensor, rir: Tensor) -> Tensor:
     return conv[peak : peak + n]
 
 
+def apply_rir_batch(wavs: Tensor, rirs: Tensor) -> Tensor:
+    """Batched RIR convolution on-device (for GPU augmentation).
+
+    ``wavs`` (B, T), ``rirs`` (B, L) zero-padded impulse responses -> (B, T). Each waveform is
+    convolved with its own RIR via a grouped conv1d (B independent convolutions in parallel),
+    unit-energy normalized and aligned to the RIR's direct-path peak, length preserved. This
+    runs in the training step so DataLoader workers (which crash on this container's shm IPC)
+    aren't needed for the costly reverb augmentation.
+    """
+    b, t = wavs.shape
+    length = rirs.shape[1]
+    energy = rirs.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(1e-8)
+    rirs = rirs / energy
+    out = torch.nn.functional.conv1d(
+        wavs.unsqueeze(0),                # (1, B, T)
+        rirs.flip(1).unsqueeze(1),        # (B, 1, L) flipped -> convolution
+        padding=length - 1, groups=b,
+    ).squeeze(0)                          # (B, T + L - 1)
+    peaks = rirs.abs().argmax(dim=1)                                    # (B,)
+    idx = peaks.unsqueeze(1) + torch.arange(t, device=wavs.device)      # (B, T)
+    return out.gather(1, idx)
+
+
 def speed_perturb(wav: Tensor, factor: float, sample_rate: int = 16000) -> Tensor:
     """Speed up (factor>1) / slow down (<1) by resampling. Changes duration and pitch.
 
