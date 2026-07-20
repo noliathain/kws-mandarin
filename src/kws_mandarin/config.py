@@ -66,6 +66,7 @@ class DataConfig:
     sample_rate: int = 16000
     batch_size: int = 128
     num_workers: int = 8
+    prefetch_factor: int = 4       # batches each worker prefetches (keeps the GPU fed)
     max_duration_s: float = 16.0  # drop utterances longer than this
 
 

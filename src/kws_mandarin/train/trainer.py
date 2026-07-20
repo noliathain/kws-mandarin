@@ -139,15 +139,20 @@ class Trainer:
         self.iterable = isinstance(train_dataset, IterableDataset)
         sampler = DistributedSampler(train_dataset) if (self.distributed and not self.iterable) else None
         self.sampler = sampler
+        nw = self.cfg.data.num_workers
         self.loader = DataLoader(
             train_dataset,
             batch_size=self.cfg.data.batch_size,
             shuffle=(sampler is None and not self.iterable),
             sampler=sampler,
-            num_workers=self.cfg.data.num_workers,
+            num_workers=nw,
             collate_fn=collate_kws,
             drop_last=True,
             pin_memory=self.use_cuda,
+            # keep the (audio-decode + augmentation) pipeline ahead of the tiny model so the
+            # GPU is not starved: don't respawn workers each epoch, and prefetch several batches.
+            persistent_workers=nw > 0,
+            prefetch_factor=(self.cfg.data.prefetch_factor if nw > 0 else None),
         )
         # dev utterances for validation (main process only)
         if dev_utts is None and self.is_main and Path(self.cfg.data.dev_manifest).exists():
