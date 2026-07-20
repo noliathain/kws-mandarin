@@ -17,10 +17,12 @@ import copy
 import glob
 import os
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
@@ -33,6 +35,17 @@ from ..models import KWSModel
 from ..tokenizer import PinyinTokenizer, ToneMode
 from .scheduler import warmup_cosine_scheduler
 from .validate_kws import run_validation
+
+# Filesystem-based tensor sharing avoids PyTorch's file-descriptor sharing race
+# ("could not unlink the shared memory file") that hangs the DataLoader under load with large
+# batches + persistent workers — and, under DDP, hangs the whole job (a stalled worker stops
+# one rank calling backward(), so every other rank blocks in the gradient all-reduce).
+torch.multiprocessing.set_sharing_strategy("file_system")
+
+
+def _dl_worker_init(_worker_id: int) -> None:
+    """Run in every DataLoader worker: use filesystem tensor sharing there too."""
+    torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 class Trainer:
@@ -60,7 +73,9 @@ class Trainer:
         if self.distributed:
             backend = "nccl" if self.use_cuda else "gloo"
             if not dist.is_initialized():
-                dist.init_process_group(backend=backend)
+                # Generous timeout so a long rank-0 validation doesn't trip the collective
+                # watchdog while the other ranks wait at the barrier.
+                dist.init_process_group(backend=backend, timeout=timedelta(minutes=30))
         if self.use_cuda:
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
@@ -161,6 +176,7 @@ class Trainer:
             persistent_workers=nw > 0,
             prefetch_factor=(self.cfg.data.prefetch_factor if nw > 0 else None),
             multiprocessing_context=mp_context,
+            worker_init_fn=(_dl_worker_init if nw > 0 else None),
         )
         # dev utterances for validation (main process only)
         if dev_utts is None and self.is_main and Path(self.cfg.data.dev_manifest).exists():
