@@ -1,6 +1,10 @@
 import torch
 
-from kws_mandarin.decode import CTCKeywordSpotter, ctc_keyword_score
+from kws_mandarin.decode import (
+    CTCKeywordSpotter,
+    ctc_keyword_score,
+    keyword_score_batch,
+)
 from kws_mandarin.models import KWSModel
 
 
@@ -44,6 +48,19 @@ def test_spotter_interface_returns_float():
     spotter = CTCKeywordSpotter()
     s = spotter.score(lp, [1, 2])
     assert isinstance(s, float) and s == float(ctc_keyword_score(lp, [1, 2]))
+
+
+def test_batched_score_equals_per_utterance():
+    # The vectorized batch DP must match per-utterance scoring of each trimmed sequence.
+    torch.manual_seed(0)
+    B, T, V = 4, 16, 7
+    lp = torch.randn(B, T, V).log_softmax(-1)
+    lengths = torch.tensor([16, 9, 13, 5])
+    kw = [1, 3, 2]
+    batched = keyword_score_batch(lp, lengths, kw)
+    for b in range(B):
+        single = ctc_keyword_score(lp[b, : int(lengths[b])], kw)
+        assert torch.allclose(batched[b], single, atol=1e-4), f"utt {b}: {batched[b]} vs {single}"
 
 
 def test_end_to_end_model_to_spotter_smoke():

@@ -3,6 +3,7 @@ import torch
 from kws_mandarin.decode import (
     NTCKeywordSpotter,
     ctc_keyword_score,
+    keyword_score_batch,
     ntc_keyword_score,
 )
 
@@ -67,6 +68,18 @@ def test_larger_penalty_is_less_tolerant():
     lenient = ntc_keyword_score(noisy, [1, 2], lambda_ins=1.0, lambda_mask=1.0)
     strict = ntc_keyword_score(noisy, [1, 2], lambda_ins=6.0, lambda_mask=6.0)
     assert lenient > strict  # smaller penalty absorbs more noise -> higher score
+
+
+def test_ntc_batched_equals_per_utterance():
+    torch.manual_seed(1)
+    B, T, V = 3, 15, 6
+    lp = torch.randn(B, T, V).log_softmax(-1)
+    lengths = torch.tensor([15, 8, 12])
+    kw = [1, 2]
+    batched = keyword_score_batch(lp, lengths, kw, ntc=True, lambda_ins=2.0, lambda_mask=2.0)
+    for b in range(B):
+        single = ntc_keyword_score(lp[b, : int(lengths[b])], kw, lambda_ins=2.0, lambda_mask=2.0)
+        assert torch.allclose(batched[b], single, atol=1e-4), f"utt {b}: {batched[b]} vs {single}"
 
 
 def test_ntc_spotter_interface():

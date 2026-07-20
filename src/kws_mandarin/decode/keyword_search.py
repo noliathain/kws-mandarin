@@ -167,11 +167,78 @@ def ntc_keyword_score(
     return best / u if normalize else best
 
 
+def _transition_batch(prev: Tensor, skip: Tensor) -> Tensor:
+    """Batched CTC forward transition. ``prev`` (B, S), ``skip`` (S,) -> (B, S)."""
+    b = prev.shape[0]
+    neg1 = prev.new_full((b, 1), _NEG)
+    neg2 = prev.new_full((b, 2), _NEG)
+    term1 = torch.cat([neg1, prev[:, :-1]], dim=1)
+    term2 = torch.where(skip, torch.cat([neg2, prev[:, :-2]], dim=1), prev.new_full(prev.shape, _NEG))
+    return torch.logaddexp(torch.logaddexp(prev, term1), term2)
+
+
+def keyword_score_batch(
+    log_probs: Tensor,
+    lengths: Tensor,
+    keyword_ids: Sequence[int],
+    blank: int = 0,
+    normalize: bool = True,
+    ntc: bool = False,
+    lambda_ins: float = 2.0,
+    lambda_mask: float = 2.0,
+) -> Tensor:
+    """Score a batch of utterances against ONE keyword. Vectorizes the any-start/any-end DP
+    over the batch dimension (one Python loop of ``T`` frames, all utterances at once).
+
+    ``log_probs`` (B, T, V), ``lengths`` (B,) valid frame counts -> ``(B,)`` scores. Frames
+    past each utterance's length are masked, so the result equals the per-utterance score of
+    each trimmed sequence. ``ntc=True`` adds the wildcard arcs (see ``ntc_keyword_score``).
+    """
+    if log_probs.dim() != 3:
+        raise ValueError(f"expected (B, T, V) log-probs, got {tuple(log_probs.shape)}")
+    b, t_len, _ = log_probs.shape
+    ext, skip = _extended(keyword_ids, blank, log_probs.device)
+    s = ext.numel()
+    u = len(keyword_ids)
+    is_blank = ext.eq(blank)
+
+    start_boost = log_probs.new_full((1, s), _NEG)
+    start_boost[0, 0] = 0.0
+    if s > 1:
+        start_boost[0, 1] = 0.0
+
+    emit_all = log_probs.index_select(2, ext)                 # (B, T, S)
+    if ntc:
+        p_blank = log_probs[:, :, blank].exp().clamp(max=1.0 - 1e-6)
+        wild = torch.log1p(-p_blank).clamp(min=-30.0)         # (B, T)
+
+    alpha = log_probs.new_full((b, s), _NEG)
+    best = log_probs.new_full((b,), _NEG)
+    lengths = lengths.to(log_probs.device)
+    for t in range(t_len):
+        trans = _transition_batch(alpha, skip) if t > 0 else log_probs.new_full((b, s), _NEG)
+        a = torch.logaddexp(trans, start_boost)
+        emit = emit_all[:, t, :]
+        if ntc:
+            pen = torch.where(is_blank, wild[:, t:t + 1] - lambda_ins, wild[:, t:t + 1] - lambda_mask)
+            emit = torch.logaddexp(emit, pen)
+        alpha_new = a + emit
+        end = torch.logaddexp(alpha_new[:, -1], alpha_new[:, -2])
+        valid = lengths > t                                    # (B,) still inside this utterance
+        alpha = torch.where(valid.unsqueeze(1), alpha_new, alpha)
+        best = torch.where(valid, torch.maximum(best, end), best)
+    return best / u if normalize else best
+
+
 class BaseKeywordSpotter(ABC):
     """Stable open-vocab decoder interface. A TDT decoder implements the same ``score``."""
 
     @abstractmethod
     def score(self, log_probs: Tensor, keyword_ids: Sequence[int]) -> float:
+        ...
+
+    @abstractmethod
+    def score_batch(self, log_probs: Tensor, lengths: Tensor, keyword_ids: Sequence[int]) -> Tensor:
         ...
 
 
@@ -183,6 +250,10 @@ class CTCKeywordSpotter(BaseKeywordSpotter):
     def score(self, log_probs: Tensor, keyword_ids: Sequence[int]) -> float:
         with torch.no_grad():
             return float(ctc_keyword_score(log_probs, keyword_ids, self.blank, self.normalize))
+
+    def score_batch(self, log_probs: Tensor, lengths: Tensor, keyword_ids: Sequence[int]) -> Tensor:
+        with torch.no_grad():
+            return keyword_score_batch(log_probs, lengths, keyword_ids, self.blank, self.normalize)
 
 
 class NTCKeywordSpotter(BaseKeywordSpotter):
@@ -200,3 +271,10 @@ class NTCKeywordSpotter(BaseKeywordSpotter):
             return float(ntc_keyword_score(
                 log_probs, keyword_ids, self.blank, self.lambda_ins, self.lambda_mask, self.normalize
             ))
+
+    def score_batch(self, log_probs: Tensor, lengths: Tensor, keyword_ids: Sequence[int]) -> Tensor:
+        with torch.no_grad():
+            return keyword_score_batch(
+                log_probs, lengths, keyword_ids, self.blank, self.normalize,
+                ntc=True, lambda_ins=self.lambda_ins, lambda_mask=self.lambda_mask,
+            )

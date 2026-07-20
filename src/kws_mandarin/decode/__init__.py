@@ -4,6 +4,7 @@ from .keyword_search import (
     NTCKeywordSpotter,
     ctc_forward_logprob,
     ctc_keyword_score,
+    keyword_score_batch,
     ntc_keyword_score,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "NTCKeywordSpotter",
     "ctc_forward_logprob",
     "ctc_keyword_score",
+    "keyword_score_batch",
     "ntc_keyword_score",
 ]

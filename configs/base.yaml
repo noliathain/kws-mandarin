@@ -14,8 +14,9 @@ data:
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
   shuffle_buffer: 2000
   sample_rate: 16000
-  batch_size: 64        # per GPU -> 512 global on 8 GPUs
+  batch_size: 128       # per GPU -> 1024 global on 8 GPUs
   num_workers: 8
+  prefetch_factor: 4
   max_duration_s: 16.0
 
 aug:
@@ -38,13 +39,13 @@ aug:
   specaug_n_time: 2
 
 optim:
-  lr: 0.003
+  lr: 0.0045            # scaled for global batch 1024
   weight_decay: 0.0001
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
-  warmup_steps: 2000
-  max_steps: 120000
+  warmup_steps: 1000
+  max_steps: 14000      # ~120 epochs over 120,098 utts at global batch 1024
   min_lr_ratio: 0.01
 
 seed: 1337
@@ -54,5 +55,5 @@ log_every: 50
 val_every: 2000
 ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/base
 keep_last: 3
-val_max_utts: 2000
+val_max_utts: 500
 val_keywords: [中国, 经济, 发展, 公司, 市场, 政府, 记者, 工作, 问题, 社会]

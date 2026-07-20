@@ -96,22 +96,23 @@ def run_validation(
 
         logits = model(batch)                        # (B, T, V)
         log_probs = logits.log_softmax(-1)
-        out_lens = model.output_lengths(lengths).tolist()
+        out_lens = model.output_lengths(lengths)     # (B,) on CPU
 
+        # --- TER (greedy, per utterance) ---
         for i, u in enumerate(chunk):
-            lp = log_probs[i, : out_lens[i]].cpu()    # (T_i, V)
-            # --- TER ---
-            hyp = greedy_decode(lp, blank)
+            hyp = greedy_decode(log_probs[i, : int(out_lens[i])], blank)
             ref = tokenizer.encode(u.text)
             tot_edits += edit_distance(hyp, ref)
             tot_len += max(1, len(ref))
-            # --- keyword trials ---
-            for kw, ids in kw_ids.items():
-                if not ids:
-                    continue
-                score = spotter.score(lp, ids)
-                label = 1 if kw in u.text else 0
-                trials.append((score, label, u.duration))
+
+        # --- keyword trials (batched DP on device: all utterances per keyword at once) ---
+        out_lens_dev = out_lens.to(device)
+        for kw, ids in kw_ids.items():
+            if not ids:
+                continue
+            scores = spotter.score_batch(log_probs, out_lens_dev, ids).cpu()  # (B,)
+            for i, u in enumerate(chunk):
+                trials.append((float(scores[i]), 1 if kw in u.text else 0, u.duration))
 
     metrics = {"ter": tot_edits / max(1, tot_len)}
     if trials and any(t[1] == 1 for t in trials) and any(t[1] == 0 for t in trials):
