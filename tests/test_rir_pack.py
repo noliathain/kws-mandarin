@@ -41,6 +41,29 @@ def test_load_rejects_sample_rate_mismatch(tmp_path):
         pass
 
 
+def test_pack_skips_overlong_non_rir_files(tmp_path):
+    # OpenSLR 28 mixes real RIRs with 30 s isotropic-noise recordings in one folder;
+    # the packer must drop the long ones (they are not impulse responses).
+    d = tmp_path / "mixed"
+    d.mkdir()
+    sf.write(str(d / "rir_short.wav"), (torch.randn(8000) * 0.1).numpy(), 16000)   # 0.5 s RIR
+    sf.write(str(d / "noise_long.wav"), (torch.randn(30 * 16000) * 0.1).numpy(), 16000)  # 30 s noise
+    out = str(tmp_path / "rirs.pt")
+    n = pack_rirs(d.as_posix(), out, max_rir_seconds=2.0)
+    assert n == 1                                   # only the short RIR kept
+    assert load_rir_pack(out)[0].numel() == 8000
+
+
+def test_apply_rir_handles_long_rir_without_oom(tmp_path):
+    # Regression: a multi-second RIR must not blow up memory (fftconvolve, not conv1d).
+    from kws_mandarin.data.augment import apply_rir
+
+    wav = torch.randn(16000)
+    long_rir = torch.randn(2 * 16000) * 0.01  # 2 s
+    out = apply_rir(wav, long_rir)
+    assert out.numel() == 16000 and torch.isfinite(out).all()
+
+
 def test_waveform_augment_uses_packed_rirs_in_memory(tmp_path):
     rir_dir = _make_rirs(tmp_path, 5)
     out = str(tmp_path / "rirs.pt")

@@ -32,24 +32,35 @@ def _load(path: Path, sample_rate: int) -> Tensor:
 
 
 def pack_rirs(rir_dir: str, out_path: str, max_rirs: int = 2000,
-              sample_rate: int = 16000, seed: int = 0) -> int:
-    """Read up to ``max_rirs`` impulse responses from ``rir_dir`` into a single .pt file."""
+              sample_rate: int = 16000, seed: int = 0, max_rir_seconds: float = 2.0) -> int:
+    """Read up to ``max_rirs`` impulse responses from ``rir_dir`` into a single .pt file.
+
+    Files longer than ``max_rir_seconds`` are skipped: an "impulse response" more than a
+    couple of seconds long is not a RIR but an isotropic-noise recording (OpenSLR 28 ships
+    both in the same folder), and convolving with one is both wrong and ruinously expensive.
+    """
     rng = random.Random(seed)
     paths = sorted(Path(rir_dir).rglob("*.wav"))
     if not paths:
         raise FileNotFoundError(f"no RIR wavs under {rir_dir}")
     if len(paths) > max_rirs:
         paths = rng.sample(paths, max_rirs)
+    max_len = int(max_rir_seconds * sample_rate)
     rirs: list[Tensor] = []
+    skipped = 0
     for p in paths:
         try:
             r = _load(p, sample_rate)
         except Exception:
             continue
-        if r.numel() > 0:
-            rirs.append(r)
+        if r.numel() == 0 or r.numel() > max_len:
+            skipped += 1  # empty, or too long to be a real RIR (isotropic noise)
+            continue
+        rirs.append(r)
     if not rirs:
         raise RuntimeError(f"no readable RIRs in {rir_dir}")
+    if skipped:
+        print(f"skipped {skipped} non-RIR files (> {max_rir_seconds}s or empty)")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"rirs": rirs, "sample_rate": sample_rate}, out_path)
     return len(rirs)
@@ -71,8 +82,11 @@ def main() -> None:
     ap.add_argument("--max-rirs", type=int, default=2000)
     ap.add_argument("--sample-rate", type=int, default=16000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--max-rir-seconds", type=float, default=2.0,
+                    help="skip files longer than this (isotropic noise, not RIRs)")
     args = ap.parse_args()
-    n = pack_rirs(args.rir_dir, args.out, args.max_rirs, args.sample_rate, args.seed)
+    n = pack_rirs(args.rir_dir, args.out, args.max_rirs, args.sample_rate, args.seed,
+                  args.max_rir_seconds)
     print(f"packed {n} RIRs -> {args.out}")
 
 

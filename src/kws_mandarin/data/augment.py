@@ -63,7 +63,9 @@ def apply_rir(wav: Tensor, rir: Tensor) -> Tensor:
     """Convolve with a room impulse response, preserving length and level.
 
     The RIR is unit-energy normalized (so it does not change loudness), and the output is
-    aligned to the RIR's direct-path peak and trimmed back to the input length.
+    aligned to the RIR's direct-path peak and trimmed back to the input length. Uses FFT
+    convolution so a long RIR does not blow up memory (a plain conv1d with a multi-second
+    kernel tries to allocate hundreds of GB).
     """
     n = wav.numel()
     energy = rir.pow(2).sum().sqrt()
@@ -71,11 +73,7 @@ def apply_rir(wav: Tensor, rir: Tensor) -> Tensor:
         return wav
     rir = rir / energy
     peak = int(torch.argmax(rir.abs()))
-    conv = torch.nn.functional.conv1d(
-        wav.view(1, 1, -1),
-        rir.flip(0).view(1, 1, -1),
-        padding=rir.numel() - 1,
-    ).view(-1)
+    conv = torchaudio.functional.fftconvolve(wav, rir)  # full convolution, (n + L - 1,)
     return conv[peak : peak + n]
 
 
