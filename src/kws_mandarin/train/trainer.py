@@ -140,6 +140,10 @@ class Trainer:
         sampler = DistributedSampler(train_dataset) if (self.distributed and not self.iterable) else None
         self.sampler = sampler
         nw = self.cfg.data.num_workers
+        # forkserver: workers fork from a clean server process, NOT from the main process that
+        # has already initialized CUDA/OpenMP threads (a plain fork there deadlocks the workers
+        # on inherited locks). Requires the dataset + augmentation to be picklable.
+        mp_context = "forkserver" if (nw > 0 and self.use_cuda) else None
         self.loader = DataLoader(
             train_dataset,
             batch_size=self.cfg.data.batch_size,
@@ -153,6 +157,7 @@ class Trainer:
             # GPU is not starved: don't respawn workers each epoch, and prefetch several batches.
             persistent_workers=nw > 0,
             prefetch_factor=(self.cfg.data.prefetch_factor if nw > 0 else None),
+            multiprocessing_context=mp_context,
         )
         # dev utterances for validation (main process only)
         if dev_utts is None and self.is_main and Path(self.cfg.data.dev_manifest).exists():

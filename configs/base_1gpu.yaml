@@ -15,18 +15,19 @@ data:
   shuffle_buffer: 256      # small -> fast first batch (no huge upfront buffer fill)
   sample_rate: 16000
   batch_size: 256          # global 256 on 1 GPU; H100 80GB is far from full
-  num_workers: 8
+  num_workers: 4           # forkserver workers (fewer = faster startup)
   prefetch_factor: 4
 
 aug:
   enabled: true
   musan_dir: null
   rir_dir: null
-  noise_pack: /teamspace/lightning_storage/kws-mandarin/musan.pt   # in-memory noise
+  # noise_pack: set to a packed MUSAN .pt (and p_noise>0) once built; null = no additive noise
+  noise_pack: null
   rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt      # in-memory RIRs
   snr_db_min: 0.0
   snr_db_max: 20.0
-  p_noise: 0.6
+  p_noise: 0.0
   p_rir: 0.5
   p_speed: 0.5
   p_gain: 0.5

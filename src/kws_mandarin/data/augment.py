@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable
+from fractions import Fraction
 from pathlib import Path
 
 import soundfile as sf
@@ -77,12 +78,18 @@ def apply_rir(wav: Tensor, rir: Tensor) -> Tensor:
     return conv[peak : peak + n]
 
 
-def speed_perturb(wav: Tensor, factor: float, sample_rate: int) -> Tensor:
-    """Speed up (factor>1) / slow down (<1) by resampling. Changes duration and pitch."""
+def speed_perturb(wav: Tensor, factor: float, sample_rate: int = 16000) -> Tensor:
+    """Speed up (factor>1) / slow down (<1) by resampling. Changes duration and pitch.
+
+    Resamples with a SMALL integer ratio. Passing (sample_rate, sample_rate/factor) directly
+    makes torchaudio build a huge sinc filter for near-coprime pairs (e.g. 16000 -> 14545),
+    which is pathologically slow. A speed-up by ``factor`` gives new_len = N/factor, i.e.
+    resample(orig=numerator, new=denominator) for factor = numerator/denominator.
+    """
     if factor == 1.0:
         return wav
-    new_sr = int(round(sample_rate / factor))
-    return torchaudio.functional.resample(wav, sample_rate, new_sr)
+    frac = Fraction(factor).limit_denominator(20)  # 1.1 -> 11/10, 0.9 -> 9/10
+    return torchaudio.functional.resample(wav, frac.numerator, frac.denominator)
 
 
 def gain_perturb(wav: Tensor, gain_db: float) -> Tensor:
@@ -123,6 +130,60 @@ class SpecAugment(nn.Module):
 
 
 # --- composite waveform augmenter -----------------------------------------------------
+
+class _MemSampler:
+    """Picklable random-choice over an in-memory list (safe for forkserver/spawn workers)."""
+
+    def __init__(self, items: list[Tensor], seed: int | None = None):
+        self._items = items
+        self._rng = random.Random(seed)
+
+    def __call__(self) -> Tensor:
+        return self._items[self._rng.randrange(len(self._items))]
+
+
+class _PackSampler:
+    """Picklable, lazily-loaded sampler over an audio pack (.pt).
+
+    Stores only the pack *path*; loads the tensors inside each worker on first use. This keeps
+    large tensor lists out of the fork/pickle boundary — pickling hundreds of shared-memory
+    tensors trips forkserver's "too many fds" limit.
+    """
+
+    def __init__(self, pack_path: str, key: str, sample_rate: int, seed: int | None = None):
+        self._path = pack_path
+        self._key = key
+        self._sr = sample_rate
+        self._seed = seed
+        self._items: list[Tensor] | None = None
+        self._rng: random.Random | None = None
+
+    def __call__(self) -> Tensor:
+        if self._items is None:
+            obj = torch.load(self._path, map_location="cpu", weights_only=False)
+            if obj.get("sample_rate") != self._sr:
+                raise ValueError(f"pack sample_rate {obj.get('sample_rate')} != {self._sr}")
+            self._items = obj[self._key]
+            self._rng = random.Random(self._seed)
+        return self._items[self._rng.randrange(len(self._items))]
+
+
+class _FileSampler:
+    """Picklable random wav loader (used when augmentation reads from a directory)."""
+
+    def __init__(self, paths, sample_rate: int, seed: int | None = None):
+        self._paths = [str(p) for p in paths]
+        self._sr = sample_rate
+        self._rng = random.Random(seed)
+
+    def __call__(self) -> Tensor:
+        p = self._paths[self._rng.randrange(len(self._paths))]
+        data, sr = sf.read(p, dtype="float32", always_2d=True)
+        wav = torch.from_numpy(data).mean(dim=1)
+        if sr != self._sr:
+            wav = torchaudio.functional.resample(wav, sr, self._sr)
+        return wav
+
 
 class WaveformAugment:
     def __init__(
@@ -175,39 +236,26 @@ class WaveformAugment:
         noise_pack: str | None = None,
         **kwargs,
     ) -> "WaveformAugment":
-        rng = random.Random(seed)
-
-        def _load(path: Path) -> Tensor:
-            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-            wav = torch.from_numpy(data).mean(dim=1)
-            if sr != sample_rate:
-                wav = torchaudio.functional.resample(wav, sr, sample_rate)
-            return wav
+        rir_seed = None if seed is None else seed + 1
 
         noise_sampler = None
-        if noise_pack:
-            # FUSE-proof: noise clips live in RAM, no per-sample small-file reads.
-            from .rir_pack import load_noise_pack
-
-            noises_mem = load_noise_pack(noise_pack, sample_rate=sample_rate)
-            if noises_mem:
-                noise_sampler = lambda: rng.choice(noises_mem)  # noqa: E731
+        if noise_pack:  # in-memory noise, loaded lazily per worker
+            if not Path(noise_pack).exists():
+                raise FileNotFoundError(f"noise_pack not found: {noise_pack}")
+            noise_sampler = _PackSampler(noise_pack, "noises", sample_rate, seed)
         elif musan_dir:
-            noises = sorted(Path(musan_dir).rglob("*.wav"))
-            if noises:
-                noise_sampler = lambda: _load(rng.choice(noises))  # noqa: E731
+            paths = sorted(Path(musan_dir).rglob("*.wav"))
+            if paths:
+                noise_sampler = _FileSampler(paths, sample_rate, seed)
 
         rir_sampler = None
-        if rir_pack:
-            # FUSE-proof: RIRs live in RAM, no per-sample I/O.
-            from .rir_pack import load_rir_pack
-
-            rirs_mem = load_rir_pack(rir_pack, sample_rate=sample_rate)
-            if rirs_mem:
-                rir_sampler = lambda: rng.choice(rirs_mem)  # noqa: E731
+        if rir_pack:  # in-memory RIRs, loaded lazily per worker
+            if not Path(rir_pack).exists():
+                raise FileNotFoundError(f"rir_pack not found: {rir_pack}")
+            rir_sampler = _PackSampler(rir_pack, "rirs", sample_rate, rir_seed)
         elif rir_dir:
-            rirs = sorted(Path(rir_dir).rglob("*.wav"))
-            if rirs:
-                rir_sampler = lambda: _load(rng.choice(rirs))  # noqa: E731
+            paths = sorted(Path(rir_dir).rglob("*.wav"))
+            if paths:
+                rir_sampler = _FileSampler(paths, sample_rate, rir_seed)
 
         return cls(noise_sampler, rir_sampler, sample_rate=sample_rate, seed=seed, **kwargs)

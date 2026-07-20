@@ -93,6 +93,25 @@ def test_waveform_augment_pipeline_runs_and_is_seeded():
     assert torch.equal(out1, out2)  # same seed -> reproducible
 
 
+def test_waveform_augment_is_picklable_for_forkserver_workers():
+    # DataLoader forkserver/spawn workers pickle the dataset (and its augmenter). Lambda
+    # samplers broke this; the _MemSampler classes must survive pickling and still run.
+    import pickle
+
+    from kws_mandarin.data.augment import _MemSampler
+
+    noise = torch.randn(16000)
+    rir = torch.zeros(64)
+    rir[0] = 1.0
+    aug = WaveformAugment(
+        noise_sampler=_MemSampler([noise], 0), rir_sampler=_MemSampler([rir], 1),
+        p_noise=1.0, p_rir=1.0, p_speed=1.0, p_gain=1.0, seed=3,
+    )
+    aug2 = pickle.loads(pickle.dumps(aug))       # must not raise (lambdas would)
+    out = aug2(torch.randn(16000))
+    assert out.numel() > 0 and torch.isfinite(out).all()
+
+
 def test_waveform_augment_can_be_disabled():
     aug = WaveformAugment(p_noise=0.0, p_rir=0.0, p_speed=0.0, p_gain=0.0)
     wav = torch.randn(16000)
