@@ -1,0 +1,46 @@
+# 2x H100 DDP run. Global batch = batch_size * 2 = 512. ~64 epochs.
+model: {scale: 3.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
+data:
+  dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
+  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
+  shuffle_buffer: 256
+  sample_rate: 16000
+  batch_size: 256          # per GPU -> global 512 on 2 GPUs
+  num_workers: 4           # per GPU (forkserver)
+  prefetch_factor: 4
+aug:
+  enabled: true
+  musan_dir: null
+  rir_dir: null
+  noise_pack: null         # MUSAN noise added later once packed
+  rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
+  snr_db_min: 0.0
+  snr_db_max: 20.0
+  p_noise: 0.0
+  p_rir: 0.5
+  p_speed: 0.5
+  p_gain: 0.5
+  specaug_enabled: true
+  specaug_freq_mask: 8
+  specaug_n_freq: 2
+  specaug_time_mask: 25
+  specaug_n_time: 2
+optim:
+  lr: 0.003                # scaled for global batch 512
+  weight_decay: 0.0001
+  beta1: 0.9
+  beta2: 0.98
+  grad_clip: 5.0
+  warmup_steps: 1000
+  max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
+  min_lr_ratio: 0.01
+seed: 1337
+precision: bf16
+ema_decay: 0.999
+log_every: 20
+val_every: 2000
+ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/base_2gpu
+keep_last: 3
+val_max_utts: 500
+val_use_ntc: false
+val_keywords: [中国, 经济, 发展, 公司, 市场, 政府, 记者, 工作, 问题, 社会]
