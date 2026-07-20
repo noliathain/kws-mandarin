@@ -1,7 +1,13 @@
 import soundfile as sf
 import torch
 
-from kws_mandarin.data import WaveformAugment, load_rir_pack, pack_rirs
+from kws_mandarin.data import (
+    WaveformAugment,
+    load_noise_pack,
+    load_rir_pack,
+    pack_noise,
+    pack_rirs,
+)
 
 
 def _make_rirs(tmp_path, n=6):
@@ -62,6 +68,33 @@ def test_apply_rir_handles_long_rir_without_oom(tmp_path):
     long_rir = torch.randn(2 * 16000) * 0.01  # 2 s
     out = apply_rir(wav, long_rir)
     assert out.numel() == 16000 and torch.isfinite(out).all()
+
+
+def test_pack_noise_crops_long_and_roundtrips(tmp_path):
+    d = tmp_path / "noise"
+    d.mkdir()
+    sf.write(str(d / "short.wav"), (torch.randn(8000) * 0.1).numpy(), 16000)        # 0.5 s
+    sf.write(str(d / "long.wav"), (torch.randn(40 * 16000) * 0.1).numpy(), 16000)   # 40 s
+    out = str(tmp_path / "noise.pt")
+    n = pack_noise(d.as_posix(), out, max_seconds=15.0)
+    assert n == 2
+    lens = sorted(x.numel() for x in load_noise_pack(out))
+    assert lens == [8000, 15 * 16000]   # long cropped to 15 s, short kept intact
+
+
+def test_waveform_augment_uses_noise_pack_in_memory(tmp_path):
+    d = tmp_path / "noise"
+    d.mkdir()
+    sf.write(str(d / "n0.wav"), (torch.randn(16000) * 0.5).numpy(), 16000)
+    out = str(tmp_path / "noise.pt")
+    pack_noise(d.as_posix(), out)
+    aug = WaveformAugment.from_dirs(
+        musan_dir=None, rir_dir=None, noise_pack=out,
+        p_noise=1.0, p_rir=0.0, p_speed=0.0, p_gain=0.0, seed=1,
+    )
+    out_wav = aug(torch.randn(16000))
+    assert out_wav.numel() == 16000 and torch.isfinite(out_wav).all()
+    assert not torch.equal(out_wav, torch.randn(16000))  # noise was mixed in
 
 
 def test_waveform_augment_uses_packed_rirs_in_memory(tmp_path):

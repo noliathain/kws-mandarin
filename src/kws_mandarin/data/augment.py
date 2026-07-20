@@ -172,6 +172,7 @@ class WaveformAugment:
         sample_rate: int = 16000,
         seed: int | None = None,
         rir_pack: str | None = None,
+        noise_pack: str | None = None,
         **kwargs,
     ) -> "WaveformAugment":
         rng = random.Random(seed)
@@ -184,7 +185,14 @@ class WaveformAugment:
             return wav
 
         noise_sampler = None
-        if musan_dir:
+        if noise_pack:
+            # FUSE-proof: noise clips live in RAM, no per-sample small-file reads.
+            from .rir_pack import load_noise_pack
+
+            noises_mem = load_noise_pack(noise_pack, sample_rate=sample_rate)
+            if noises_mem:
+                noise_sampler = lambda: rng.choice(noises_mem)  # noqa: E731
+        elif musan_dir:
             noises = sorted(Path(musan_dir).rglob("*.wav"))
             if noises:
                 noise_sampler = lambda: _load(rng.choice(noises))  # noqa: E731

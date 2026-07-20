@@ -75,19 +75,65 @@ def load_rir_pack(path: str, sample_rate: int | None = None) -> list[Tensor]:
     return obj["rirs"]
 
 
+def pack_noise(noise_dir: str, out_path: str, max_items: int = 1000,
+               sample_rate: int = 16000, max_seconds: float = 15.0, seed: int = 0) -> int:
+    """Pack a MUSAN-style noise subset into one .pt loaded into RAM (FUSE-proof augmentation).
+
+    Same rationale as ``pack_rirs``: reading thousands of small noise files off an S3-FUSE
+    mount per training sample stalls the input pipeline. Long clips are cropped to
+    ``max_seconds`` (``add_noise`` tiles/crops to the utterance length anyway) to bound RAM.
+    """
+    rng = random.Random(seed)
+    paths = sorted(Path(noise_dir).rglob("*.wav"))
+    if not paths:
+        raise FileNotFoundError(f"no noise wavs under {noise_dir}")
+    if len(paths) > max_items:
+        paths = rng.sample(paths, max_items)
+    max_len = int(max_seconds * sample_rate)
+    noises: list[Tensor] = []
+    for p in paths:
+        try:
+            r = _load(p, sample_rate)
+        except Exception:
+            continue
+        if r.numel() == 0:
+            continue
+        noises.append(r[:max_len] if r.numel() > max_len else r)
+    if not noises:
+        raise RuntimeError(f"no readable noise in {noise_dir}")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"noises": noises, "sample_rate": sample_rate}, out_path)
+    return len(noises)
+
+
+def load_noise_pack(path: str, sample_rate: int | None = None) -> list[Tensor]:
+    obj = torch.load(path, map_location="cpu", weights_only=False)
+    if sample_rate is not None and obj.get("sample_rate") != sample_rate:
+        raise ValueError(f"noise pack sample_rate {obj.get('sample_rate')} != expected {sample_rate}")
+    return obj["noises"]
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Pack RIR wavs into a single in-memory file")
+    ap = argparse.ArgumentParser(description="Pack RIR/noise wavs into a single in-memory file")
+    ap.add_argument("--noise", action="store_true", help="pack noise (crop long) instead of RIRs")
     ap.add_argument("--rir-dir", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-rirs", type=int, default=2000)
     ap.add_argument("--sample-rate", type=int, default=16000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-rir-seconds", type=float, default=2.0,
-                    help="skip files longer than this (isotropic noise, not RIRs)")
+                    help="RIR mode: skip files longer than this (isotropic noise, not RIRs)")
+    ap.add_argument("--max-noise-seconds", type=float, default=15.0,
+                    help="noise mode: crop clips longer than this")
     args = ap.parse_args()
-    n = pack_rirs(args.rir_dir, args.out, args.max_rirs, args.sample_rate, args.seed,
-                  args.max_rir_seconds)
-    print(f"packed {n} RIRs -> {args.out}")
+    if args.noise:
+        n = pack_noise(args.rir_dir, args.out, args.max_rirs, args.sample_rate,
+                       args.max_noise_seconds, args.seed)
+        print(f"packed {n} noise clips -> {args.out}")
+    else:
+        n = pack_rirs(args.rir_dir, args.out, args.max_rirs, args.sample_rate, args.seed,
+                      args.max_rir_seconds)
+        print(f"packed {n} RIRs -> {args.out}")
 
 
 if __name__ == "__main__":

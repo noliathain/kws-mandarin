@@ -28,7 +28,8 @@ class AugConfig:
     enabled: bool = True
     musan_dir: str | None = None
     rir_dir: str | None = None
-    rir_pack: str | None = None  # in-memory RIR .pt (preferred over rir_dir; FUSE-proof)
+    rir_pack: str | None = None    # in-memory RIR .pt (preferred over rir_dir; FUSE-proof)
+    noise_pack: str | None = None  # in-memory noise .pt (preferred over musan_dir; FUSE-proof)
     snr_db_min: float = 0.0
     snr_db_max: float = 20.0
     p_noise: float = 0.6
