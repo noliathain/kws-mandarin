@@ -5,9 +5,9 @@ data:
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 256          # per GPU -> global 512 on 2 GPUs
-  num_workers: 4           # per GPU (forkserver)
-  prefetch_factor: 4
+  batch_size: 768          # per GPU -> global 1536; amortizes per-step overhead (tiny model)
+  num_workers: 12          # per GPU (forkserver); ~24 total on a 52-core box
+  prefetch_factor: 6
 aug:
   enabled: true
   musan_dir: null
@@ -26,13 +26,13 @@ aug:
   specaug_time_mask: 25
   specaug_n_time: 2
 optim:
-  lr: 0.003                # scaled for global batch 512
+  lr: 0.005                # scaled for global batch 1536
   weight_decay: 0.0001
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
-  warmup_steps: 1000
-  max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
+  warmup_steps: 500
+  max_steps: 5000          # ~64 epochs over 120,098 utts at global batch 1536
   min_lr_ratio: 0.01
 seed: 1337
 precision: bf16
