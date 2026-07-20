@@ -154,6 +154,7 @@ class ShardDataset(IterableDataset):
         shuffle_shards: bool = True,
         seed: int = 0,
         min_units: int = 1,
+        infinite: bool = False,
     ):
         super().__init__()
         self.shards = list(shards)
@@ -164,12 +165,16 @@ class ShardDataset(IterableDataset):
         self.shuffle_shards = shuffle_shards
         self.seed = seed
         self.min_units = min_units
+        # infinite: cycle shards forever (reshuffling each pass). Under DDP this avoids the
+        # epoch-boundary hang where unevenly-split shards give ranks different step counts and
+        # desync the gradient all-reduce. Training is bounded by max_steps instead of epochs.
+        self.infinite = infinite
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def _my_shards(self) -> list[str]:
+    def _my_shards(self, pass_idx: int = 0) -> list[str]:
         info = get_worker_info()
         worker = info.id if info else 0
         n_workers = info.num_workers if info else 1
@@ -180,11 +185,11 @@ class ShardDataset(IterableDataset):
             rank, world = 0, 1
         shards = list(self.shards)
         if self.shuffle_shards:
-            random.Random(self.seed + self.epoch).shuffle(shards)
+            random.Random(self.seed + self.epoch + pass_idx * 7919).shuffle(shards)
         return select_shards(shards, rank, world, worker, n_workers)
 
-    def _samples(self):
-        for shard in self._my_shards():
+    def _samples(self, pass_idx: int = 0):
+        for shard in self._my_shards(pass_idx):
             for key, wav, text, _dur in _iter_shard(shard, self.sample_rate):
                 target = self.tokenizer.encode(text)
                 if len(target) < self.min_units:
@@ -193,17 +198,26 @@ class ShardDataset(IterableDataset):
                     wav = self.augment(wav)
                 yield {"wav": wav, "target": torch.tensor(target, dtype=torch.long), "utt_id": key}
 
+    def _all_samples(self):
+        """One pass over this reader's shards, or endless reshuffled passes if infinite."""
+        pass_idx = 0
+        while True:
+            yield from self._samples(pass_idx)
+            if not self.infinite:
+                return
+            pass_idx += 1
+
     def __iter__(self):
         if self.shuffle_buffer <= 1:
-            yield from self._samples()
+            yield from self._all_samples()
             return
         rng = random.Random(self.seed + self.epoch + 1)
         buf: list[dict] = []
-        for item in self._samples():
+        for item in self._all_samples():
             buf.append(item)
             if len(buf) >= self.shuffle_buffer:
                 yield buf.pop(rng.randrange(len(buf)))
-        rng.shuffle(buf)
+        rng.shuffle(buf)  # only reached when not infinite
         yield from buf
 
 

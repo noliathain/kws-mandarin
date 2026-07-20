@@ -127,6 +127,9 @@ class Trainer:
             return ShardDataset(
                 shards, self.tokenizer, sample_rate=d.sample_rate, augment=augment,
                 shuffle_buffer=d.shuffle_buffer, seed=self.cfg.seed,
+                # cycle forever: training is bounded by max_steps, and under DDP this prevents
+                # the epoch-boundary desync/hang from unevenly-split shards across ranks.
+                infinite=self.distributed,
             )
         return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
 

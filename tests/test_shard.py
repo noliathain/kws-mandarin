@@ -61,6 +61,24 @@ def test_shuffle_buffer_preserves_multiset(tmp_path):
     assert ids == sorted(u.utt_id for u in utts)          # shuffling loses nothing
 
 
+def test_infinite_mode_cycles_past_one_pass(tmp_path):
+    # In DDP we cycle shards forever so ranks never hit an epoch boundary (which desyncs the
+    # all-reduce when shards split unevenly). A finite dataset yields exactly the corpus once;
+    # an infinite one keeps going.
+    utts = _corpus(tmp_path, 6)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=2, workers=1)
+    tok = PinyinTokenizer()
+
+    finite = ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=False, infinite=False)
+    assert sum(1 for _ in finite) == 6
+
+    inf = ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=True, infinite=True)
+    it = iter(inf)
+    got = [next(it)["utt_id"] for _ in range(15)]   # more than the 6 real utts -> must cycle
+    assert len(got) == 15
+    assert set(got) == {u.utt_id for u in utts}      # only real utts, just repeated
+
+
 def test_training_step_from_shards(tmp_path):
     utts = _corpus(tmp_path, 8)
     shards = write_shards(utts, str(tmp_path / "shards"), num_shards=4, workers=1)
