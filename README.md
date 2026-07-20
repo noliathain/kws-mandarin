@@ -84,9 +84,9 @@ uv run python -m kws_mandarin.data.validate --manifests <root>/manifests --deep 
 # 3. pack audio into WebDataset shards (FUSE/S3-friendly; avoids 141k small-file reads)
 uv run python -m kws_mandarin.data.shard --manifest <root>/manifests/aishell1_train.jsonl --out <root>/shards/train --num-shards 256 --workers $(nproc)
 
-# 4. train on 8 GPUs (DDP)  — set data.train_shards to the shard glob in the config
-uv sync --extra train
-torchrun --standalone --nproc_per_node=8 -m kws_mandarin.train --config configs/base.yaml
+# 4. train on 8 GPUs (DDP)  — set data.train_shards to the shard glob in the config.
+# Run torchrun THROUGH uv (--extra train) so it uses the .venv python, not system/conda python.
+uv run --extra train torchrun --standalone --nproc_per_node=8 -m kws_mandarin.train --config configs/base.yaml
 ```
 
 Set `data.train_shards: <root>/shards/train/*.tar` in the config to stream from shards; the
