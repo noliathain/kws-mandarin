@@ -5,9 +5,9 @@ data:
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 256          # per GPU -> global 512. Larger batches (768) padded to ~16s create
-                           # ~800MB tensors that race/crash the worker->main shm transfer.
-  num_workers: 4           # per GPU
+  batch_size: 256          # per GPU -> global 512
+  num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
+                           # transfer races randomly ("could not unlink shared memory"); 0 avoids it
   prefetch_factor: 2
 aug:
   enabled: true
@@ -18,7 +18,7 @@ aug:
   snr_db_min: 0.0
   snr_db_max: 20.0
   p_noise: 0.0
-  p_rir: 0.5
+  p_rir: 0.0               # RIR fftconvolve is the costly aug; off so num_workers=0 stays fast
   p_speed: 0.5
   p_gain: 0.5
   specaug_enabled: true
