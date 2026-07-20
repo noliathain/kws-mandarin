@@ -162,6 +162,7 @@ class Trainer:
                 # cycle forever: training is bounded by max_steps, and under DDP this prevents
                 # the epoch-boundary desync/hang from unevenly-split shards across ranks.
                 infinite=self.distributed,
+                num_threads=d.loader_threads,
             )
         return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
 

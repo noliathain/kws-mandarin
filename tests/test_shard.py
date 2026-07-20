@@ -79,6 +79,23 @@ def test_infinite_mode_cycles_past_one_pass(tmp_path):
     assert set(got) == {u.utt_id for u in utts}      # only real utts, just repeated
 
 
+def test_threaded_loading_recovers_all_samples(tmp_path):
+    # Parallel decode+augment across threads must yield the same set of utterances as serial.
+    utts = _corpus(tmp_path, 12)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=4, workers=1)
+    tok = PinyinTokenizer()
+
+    serial = {i["utt_id"] for i in ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=False)}
+    threaded = ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=False, num_threads=4)
+    got = {}
+    for item in threaded:
+        got[item["utt_id"]] = item
+    assert set(got) == serial == {u.utt_id for u in utts}
+    # decoded target still correct through the thread path
+    u0 = next(u for u in utts if u.utt_id == "u0")
+    assert got["u0"]["target"].tolist() == tok.encode(u0.text)
+
+
 def test_training_step_from_shards(tmp_path):
     utts = _corpus(tmp_path, 8)
     shards = write_shards(utts, str(tmp_path / "shards"), num_shards=4, workers=1)

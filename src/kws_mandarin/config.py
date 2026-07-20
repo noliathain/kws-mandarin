@@ -70,6 +70,8 @@ class DataConfig:
     batch_size: int = 128
     num_workers: int = 8
     prefetch_factor: int = 4       # batches each worker prefetches (keeps the GPU fed)
+    loader_threads: int = 0        # >0: parallelize shard decode+augment across threads
+                                   # (with num_workers=0 this uses all cores, no worker IPC)
     max_duration_s: float = 16.0  # drop utterances longer than this
 
 

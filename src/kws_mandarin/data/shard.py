@@ -17,8 +17,9 @@ import io
 import json
 import random
 import tarfile
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
@@ -143,6 +144,54 @@ def _assemble(key: str, parts: dict[str, bytes], sample_rate: int):
     return key, wav, meta["text"], meta["duration"]
 
 
+def _iter_shard_raw(path: str):
+    """Yield (key, flac_bytes, text) grouped by key — cheap sequential tar reads, NO decode.
+
+    Decode/augment (the expensive, GIL-releasing part) is done downstream, in parallel threads.
+    """
+    with tarfile.open(path, "r") as tar:
+        cur_key = None
+        cur: dict[str, bytes] = {}
+        for member in tar:
+            if not member.isfile():
+                continue
+            key, ext = member.name.rsplit(".", 1)
+            data = tar.extractfile(member).read()
+            if cur_key is not None and key != cur_key:
+                yield cur_key, cur["flac"], json.loads(cur["json"])["text"]
+                cur = {}
+            cur_key = key
+            cur[ext] = data
+        if cur_key is not None:
+            yield cur_key, cur["flac"], json.loads(cur["json"])["text"]
+
+
+def _threaded_map(fn, iterable, num_threads: int):
+    """Stream ``fn`` over ``iterable`` across a thread pool, order-preserving, bounded in-flight.
+
+    FLAC decode + torchaudio resample release the GIL, so this genuinely parallelizes the
+    per-clip work across cores — with no multiprocessing (avoids the container's broken
+    worker->main shared-memory IPC). Results that come back None are dropped.
+    """
+    max_pending = num_threads * 3
+    with ThreadPoolExecutor(max_workers=num_threads) as ex:
+        it = iter(iterable)
+        pending: deque = deque()
+        for _ in range(max_pending):
+            try:
+                pending.append(ex.submit(fn, next(it)))
+            except StopIteration:
+                break
+        while pending:
+            res = pending.popleft().result()
+            try:
+                pending.append(ex.submit(fn, next(it)))
+            except StopIteration:
+                pass
+            if res is not None:
+                yield res
+
+
 class ShardDataset(IterableDataset):
     def __init__(
         self,
@@ -155,6 +204,7 @@ class ShardDataset(IterableDataset):
         seed: int = 0,
         min_units: int = 1,
         infinite: bool = False,
+        num_threads: int = 0,
     ):
         super().__init__()
         self.shards = list(shards)
@@ -165,6 +215,9 @@ class ShardDataset(IterableDataset):
         self.shuffle_shards = shuffle_shards
         self.seed = seed
         self.min_units = min_units
+        # >0: decode+augment in a thread pool (GIL-released work parallelizes across cores),
+        # which is how we use all the cores without multiprocessing worker IPC.
+        self.num_threads = num_threads
         # infinite: cycle shards forever (reshuffling each pass). Under DDP this avoids the
         # epoch-boundary hang where unevenly-split shards give ranks different step counts and
         # desync the gradient all-reduce. Training is bounded by max_steps instead of epochs.
@@ -188,15 +241,30 @@ class ShardDataset(IterableDataset):
             random.Random(self.seed + self.epoch + pass_idx * 7919).shuffle(shards)
         return select_shards(shards, rank, world, worker, n_workers)
 
+    def _process(self, raw) -> dict | None:
+        """Decode + tokenize + augment one (key, flac_bytes, text) — runs in the thread pool."""
+        key, flac_bytes, text = raw
+        target = self.tokenizer.encode(text)
+        if len(target) < self.min_units:
+            return None
+        wav = _decode_audio(flac_bytes, self.sample_rate)
+        if self.augment is not None:
+            wav = self.augment(wav)
+        return {"wav": wav, "target": torch.tensor(target, dtype=torch.long), "utt_id": key}
+
     def _samples(self, pass_idx: int = 0):
-        for shard in self._my_shards(pass_idx):
-            for key, wav, text, _dur in _iter_shard(shard, self.sample_rate):
-                target = self.tokenizer.encode(text)
-                if len(target) < self.min_units:
-                    continue
-                if self.augment is not None:
-                    wav = self.augment(wav)
-                yield {"wav": wav, "target": torch.tensor(target, dtype=torch.long), "utt_id": key}
+        raw_stream = (
+            raw
+            for shard in self._my_shards(pass_idx)
+            for raw in _iter_shard_raw(shard)
+        )
+        if self.num_threads and self.num_threads > 1:
+            yield from _threaded_map(self._process, raw_stream, self.num_threads)
+        else:
+            for raw in raw_stream:
+                s = self._process(raw)
+                if s is not None:
+                    yield s
 
     def _all_samples(self):
         """One pass over this reader's shards, or endless reshuffled passes if infinite."""
