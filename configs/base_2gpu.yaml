@@ -2,7 +2,7 @@
 model: {scale: 3.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
 data:
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
-  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
+  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
   batch_size: 256          # per GPU -> global 512
