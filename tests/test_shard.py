@@ -79,6 +79,20 @@ def test_infinite_mode_cycles_past_one_pass(tmp_path):
     assert set(got) == {u.utt_id for u in utts}      # only real utts, just repeated
 
 
+def test_pcm_shard_roundtrip(tmp_path):
+    # PCM shards must recover every utterance, decoded to ~the original waveform (int16 precision).
+    utts = _corpus(tmp_path, 6)
+    shards = write_shards(utts, str(tmp_path / "pcm"), num_shards=2, workers=1, fmt="pcm")
+    tok = PinyinTokenizer()
+    got = {i["utt_id"]: i for i in ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=False)}
+    assert set(got) == {u.utt_id for u in utts}
+    u0 = next(u for u in utts if u.utt_id == "u0")
+    orig, _ = sf.read(u0.wav, dtype="float32")
+    assert got["u0"]["wav"].numel() == len(orig)
+    assert (got["u0"]["wav"] - torch.from_numpy(orig)).abs().max() < 1e-3
+    assert got["u0"]["target"].tolist() == tok.encode(u0.text)
+
+
 def test_threaded_loading_recovers_all_samples(tmp_path):
     # Parallel decode+augment across threads must yield the same set of utterances as serial.
     utts = _corpus(tmp_path, 12)

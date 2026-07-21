@@ -23,6 +23,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
@@ -39,12 +40,25 @@ def _encode_flac(wav: Tensor, sample_rate: int) -> bytes:
     return bio.getvalue()
 
 
-def _decode_audio(raw: bytes, sample_rate: int) -> Tensor:
+def _encode_pcm(wav: Tensor, sample_rate: int) -> bytes:
+    """Raw little-endian int16 mono PCM. Decoding is a memcpy (no codec) — the fast path."""
+    return (wav.clamp(-1.0, 1.0) * 32767.0).to(torch.int16).numpy().tobytes()
+
+
+def _decode_flac(raw: bytes, sample_rate: int) -> Tensor:
     data, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=True)
     wav = torch.from_numpy(data).mean(dim=1)
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)
     return wav
+
+
+def _decode_pcm(raw: bytes) -> Tensor:
+    return torch.from_numpy(np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0)
+
+
+def _decode_audio(raw: bytes, ext: str, sample_rate: int) -> Tensor:
+    return _decode_pcm(raw) if ext == "pcm" else _decode_flac(raw, sample_rate)
 
 
 def _load_wav(path: str, sample_rate: int) -> Tensor:
@@ -58,7 +72,9 @@ def _load_wav(path: str, sample_rate: int) -> Tensor:
 # --- writing --------------------------------------------------------------------------
 
 def _write_one_shard(args: tuple) -> tuple[str, int]:
-    shard_path, utt_dicts, sample_rate = args
+    shard_path, utt_dicts, sample_rate, fmt = args
+    audio_ext = ".pcm" if fmt == "pcm" else ".flac"
+    encode = _encode_pcm if fmt == "pcm" else _encode_flac
     n = 0
     with tarfile.open(shard_path, "w") as tar:
         for u in utt_dicts:
@@ -67,12 +83,12 @@ def _write_one_shard(args: tuple) -> tuple[str, int]:
             except Exception:
                 continue
             key = u["utt_id"]
-            audio = _encode_flac(wav, sample_rate)
+            audio = encode(wav, sample_rate)
             meta = json.dumps(
                 {"text": u["text"], "duration": u["duration"], "speaker": u["speaker"]},
                 ensure_ascii=False,
             ).encode("utf-8")
-            for ext, payload in ((".flac", audio), (".json", meta)):
+            for ext, payload in ((audio_ext, audio), (".json", meta)):
                 info = tarfile.TarInfo(f"{key}{ext}")
                 info.size = len(payload)
                 tar.addfile(info, io.BytesIO(payload))
@@ -87,8 +103,13 @@ def write_shards(
     num_shards: int = 256,
     sample_rate: int = 16000,
     workers: int = 8,
+    fmt: str = "flac",
 ) -> list[str]:
-    """Pack utterances into ``num_shards`` tar shards (round-robin for balance + shuffling)."""
+    """Pack utterances into ``num_shards`` tar shards (round-robin for balance + shuffling).
+
+    ``fmt``: "flac" (compact, ~2x smaller) or "pcm" (raw int16 — no decode at read time, so
+    the training loop stays fast without any DataLoader workers).
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     num_shards = max(1, min(num_shards, len(utterances)))
@@ -98,7 +119,7 @@ def write_shards(
         buckets[i % num_shards].append(asdict(u))
 
     tasks = [
-        (str(out / f"{prefix}-{s:05d}.tar"), buckets[s], sample_rate)
+        (str(out / f"{prefix}-{s:05d}.tar"), buckets[s], sample_rate, fmt)
         for s in range(num_shards)
     ]
     if workers > 1:
@@ -138,16 +159,25 @@ def _iter_shard(path: str, sample_rate: int):
             yield _assemble(cur_key, cur, sample_rate)
 
 
+def _audio_part(cur: dict[str, bytes]) -> tuple[str, bytes]:
+    ext = "pcm" if "pcm" in cur else "flac"
+    return ext, cur[ext]
+
+
 def _assemble(key: str, parts: dict[str, bytes], sample_rate: int):
     meta = json.loads(parts["json"].decode("utf-8"))
-    wav = _decode_audio(parts["flac"], sample_rate)
-    return key, wav, meta["text"], meta["duration"]
+    ext, audio = _audio_part(parts)
+    return key, _decode_audio(audio, ext, sample_rate), meta["text"], meta["duration"]
+
+
+def _raw_item(key: str, cur: dict[str, bytes]):
+    ext, audio = _audio_part(cur)
+    return key, ext, audio, json.loads(cur["json"])["text"]
 
 
 def _iter_shard_raw(path: str):
-    """Yield (key, flac_bytes, text) grouped by key — cheap sequential tar reads, NO decode.
-
-    Decode/augment (the expensive, GIL-releasing part) is done downstream, in parallel threads.
+    """Yield (key, audio_ext, audio_bytes, text) grouped by key — cheap sequential tar reads,
+    NO decode. Decode/augment happens downstream (per-sample), where it can be batched/parallel.
     """
     with tarfile.open(path, "r") as tar:
         cur_key = None
@@ -158,12 +188,12 @@ def _iter_shard_raw(path: str):
             key, ext = member.name.rsplit(".", 1)
             data = tar.extractfile(member).read()
             if cur_key is not None and key != cur_key:
-                yield cur_key, cur["flac"], json.loads(cur["json"])["text"]
+                yield _raw_item(cur_key, cur)
                 cur = {}
             cur_key = key
             cur[ext] = data
         if cur_key is not None:
-            yield cur_key, cur["flac"], json.loads(cur["json"])["text"]
+            yield _raw_item(cur_key, cur)
 
 
 def _threaded_map(fn, iterable, num_threads: int):
@@ -242,12 +272,12 @@ class ShardDataset(IterableDataset):
         return select_shards(shards, rank, world, worker, n_workers)
 
     def _process(self, raw) -> dict | None:
-        """Decode + tokenize + augment one (key, flac_bytes, text) — runs in the thread pool."""
-        key, flac_bytes, text = raw
+        """Decode + tokenize + augment one (key, ext, audio_bytes, text)."""
+        key, ext, audio_bytes, text = raw
         target = self.tokenizer.encode(text)
         if len(target) < self.min_units:
             return None
-        wav = _decode_audio(flac_bytes, self.sample_rate)
+        wav = _decode_audio(audio_bytes, ext, self.sample_rate)
         if self.augment is not None:
             wav = self.augment(wav)
         return {"wav": wav, "target": torch.tensor(target, dtype=torch.long), "utt_id": key}
@@ -291,9 +321,10 @@ class ShardDataset(IterableDataset):
 
 def write_shards_from_manifest(
     manifest_path: str, out_dir: str, prefix: str = "shard",
-    num_shards: int = 256, sample_rate: int = 16000, workers: int = 8,
+    num_shards: int = 256, sample_rate: int = 16000, workers: int = 8, fmt: str = "flac",
 ) -> list[str]:
-    return write_shards(read_manifest(manifest_path), out_dir, prefix, num_shards, sample_rate, workers)
+    return write_shards(read_manifest(manifest_path), out_dir, prefix, num_shards,
+                        sample_rate, workers, fmt)
 
 
 def main() -> None:
@@ -306,11 +337,14 @@ def main() -> None:
     ap.add_argument("--num-shards", type=int, default=256)
     ap.add_argument("--sample-rate", type=int, default=16000)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--format", choices=["flac", "pcm"], default="flac",
+                    help="pcm = raw int16, no decode at read time (fast training loop)")
     args = ap.parse_args()
     paths = write_shards_from_manifest(
-        args.manifest, args.out, args.prefix, args.num_shards, args.sample_rate, args.workers
+        args.manifest, args.out, args.prefix, args.num_shards, args.sample_rate, args.workers,
+        args.format,
     )
-    print(f"wrote {len(paths)} shards to {args.out}")
+    print(f"wrote {len(paths)} {args.format} shards to {args.out}")
 
 
 if __name__ == "__main__":
