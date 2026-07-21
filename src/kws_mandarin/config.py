@@ -57,6 +57,10 @@ class OptimConfig:
     beta1: float = 0.9
     beta2: float = 0.98
     grad_clip: float = 5.0
+    accum_steps: int = 1           # micro-batches per optimizer step. Global batch is
+                                   # batch_size * world_size * accum_steps, so halving
+                                   # batch_size and doubling this keeps the recipe identical
+                                   # while halving activation memory.
     warmup_steps: int = 2000
     max_steps: int = 120000
     min_lr_ratio: float = 0.01

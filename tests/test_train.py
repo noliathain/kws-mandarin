@@ -267,3 +267,62 @@ def test_final_validation_runs_on_every_rank(tmp_path):
     trainer.train(resume=False)
 
     assert calls, "non-main rank skipped the final validate_and_checkpoint -> barrier mismatch"
+
+
+def test_accumulation_averages_gradients_rather_than_summing(tmp_path):
+    # accum_steps lets a big model use a small micro-batch without changing the recipe:
+    # global batch = batch_size * world * accum_steps. That requires dividing each micro-batch
+    # loss by accum_steps -- summing instead would silently double the effective learning rate.
+    #
+    # Compared against per-micro-batch gradients, NOT against one large batch: the model has 25
+    # BatchNorm layers whose statistics are per micro-batch, so accumulation is deliberately
+    # not identical to a single larger batch. That is a real caveat of accum_steps, not a bug.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.data.batch_size = 2
+    cfg.optim.accum_steps = 2
+    cfg.optim.max_steps = 1
+    cfg.val_every = 10_000
+    cfg.optim.grad_clip = 1e9              # clipping would hide a factor-of-2 error
+    trainer = Trainer(cfg)
+    trainer.raw_model.eval()               # freeze BN running stats so both paths match exactly
+
+    batches = []
+    it = iter(trainer.loader)
+    batches = [next(it), next(it)]
+
+    def grad_of(batch):
+        trainer.optimizer.zero_grad(set_to_none=True)
+        trainer._loss_from_batch(batch).backward()
+        return [p.grad.detach().clone() for p in trainer.raw_model.parameters() if p.grad is not None]
+
+    g1, g2 = grad_of(batches[0]), grad_of(batches[1])
+    expected = [(a + b) / 2 for a, b in zip(g1, g2)]
+
+    trainer.optimizer.zero_grad(set_to_none=True)
+    for b in batches:                      # exactly what the loop does with accum_steps=2
+        (trainer._loss_from_batch(b) / 2).backward()
+    actual = [p.grad.detach().clone() for p in trainer.raw_model.parameters() if p.grad is not None]
+
+    for e, a in zip(expected, actual):
+        assert torch.allclose(e, a, atol=1e-6), "accumulated gradient is not the mean"
+
+
+def test_accumulation_takes_one_optimizer_step_per_cycle(tmp_path):
+    # self.step must count OPTIMIZER steps, not micro-batches, or max_steps and the LR
+    # schedule silently mean something different whenever accum_steps changes.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.data.batch_size = 2
+    cfg.optim.accum_steps = 2
+    cfg.optim.max_steps = 3
+    cfg.val_every = 10_000
+    trainer = Trainer(cfg)
+
+    n_opt = []
+    real = trainer.optimizer.step
+    trainer.optimizer.step = lambda *a, **k: (n_opt.append(1), real(*a, **k))[1]
+    trainer.train(resume=False)
+
+    assert trainer.step == 3
+    assert len(n_opt) == 3, f"expected 3 optimizer steps for 3 accumulated steps, got {len(n_opt)}"

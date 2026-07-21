@@ -124,6 +124,7 @@ class Trainer:
         self.best_metric = float("inf")
         self.n_bad_loss = 0
         self.median_step = 0.0
+        self.micro_idx = 0
         # Preemption (or a plain Ctrl-C / tmux kill) otherwise discards everything since the
         # last validation — up to val_every steps.
         self._stop_requested = False
@@ -359,24 +360,26 @@ class Trainer:
                 new_lengths[sel] = ln
             wavs, lengths, t = out, new_lengths, tmax
 
+        # Both stages below augment ONLY the selected rows. Computing the whole batch and then
+        # discarding ~half with torch.where doubled the working set of an FFT that is already
+        # the largest allocation in the step — enough to OOM the bigger models outright.
         if self.gpu_rirs is not None and a.p_rir > 0:
-            hit = torch.rand(b, device=dev) < a.p_rir
-            if bool(hit.any()):
-                idx = torch.randint(0, self.gpu_rirs.shape[0], (b,), device=dev)
-                wavs = torch.where(hit.unsqueeze(1), apply_rir_batch(wavs, self.gpu_rirs[idx]), wavs)
+            sel = (torch.rand(b, device=dev) < a.p_rir).nonzero().flatten()
+            if sel.numel():
+                idx = torch.randint(0, self.gpu_rirs.shape[0], (sel.numel(),), device=dev)
+                wavs = wavs.index_copy(0, sel, apply_rir_batch(wavs[sel], self.gpu_rirs[idx]))
 
         if self.gpu_noises is not None and a.p_noise > 0:
-            hit = torch.rand(b, device=dev) < a.p_noise
-            if bool(hit.any()):
+            sel = (torch.rand(b, device=dev) < a.p_noise).nonzero().flatten()
+            if sel.numel():
                 bank_n, bank_len = self.gpu_noises.shape
-                idx = torch.randint(0, bank_n, (b,), device=dev)
+                idx = torch.randint(0, bank_n, (sel.numel(),), device=dev)
                 max_off = max(1, bank_len - t + 1)
-                off = torch.randint(0, max_off, (b,), device=dev)
+                off = torch.randint(0, max_off, (sel.numel(),), device=dev)
                 pos = (off.unsqueeze(1) + torch.arange(t, device=dev)).clamp(max=bank_len - 1)
-                noise = self.gpu_noises[idx].gather(1, pos)          # (B, T) random crops
-                snr = torch.empty(b, device=dev).uniform_(a.snr_db_min, a.snr_db_max)
-                noisy = add_noise_batch(wavs, noise, snr, lengths)
-                wavs = torch.where(hit.unsqueeze(1), noisy, wavs)
+                noise = self.gpu_noises[idx].gather(1, pos)          # (len(sel), T) random crops
+                snr = torch.empty(sel.numel(), device=dev).uniform_(a.snr_db_min, a.snr_db_max)
+                wavs = wavs.index_copy(0, sel, add_noise_batch(wavs[sel], noise, snr, lengths[sel]))
         return wavs, lengths
 
     def _loss_from_batch(self, batch) -> torch.Tensor:
@@ -407,6 +410,7 @@ class Trainer:
         self.model.train()
         amp_dtype = self._amp_dtype()
         max_steps = self.cfg.optim.max_steps
+        accum = max(1, self.cfg.optim.accum_steps)
         epoch = 0
         t0 = time.time()
         while self.step < max_steps:
@@ -417,8 +421,9 @@ class Trainer:
             for batch in _prefetch(self.loader, depth=self.cfg.data.prefetch_factor or 2):
                 if self.step >= max_steps or self._stop_requested:
                     break
-                step_started = time.time()
-                self.optimizer.zero_grad(set_to_none=True)
+                if self.micro_idx == 0:
+                    step_started = time.time()
+                    self.optimizer.zero_grad(set_to_none=True)
                 if amp_dtype is not None:
                     with torch.autocast(device_type="cuda", dtype=amp_dtype):
                         loss = self._loss_from_batch(batch)
@@ -433,8 +438,25 @@ class Trainer:
                         print(f"WARNING step {self.step}: non-finite loss ({loss.item()}), "
                               f"batch skipped ({self.n_bad_loss} so far)", flush=True)
                     self.optimizer.zero_grad(set_to_none=True)
+                    self.micro_idx = 0
                     self.step += 1
                     continue
+
+                # Gradient accumulation: average the micro-batches so the update matches one
+                # of batch_size*accum_steps, then skip DDP's all-reduce until the last one
+                # (syncing every micro-batch would cost accum_steps times the communication).
+                self.micro_idx += 1
+                last_micro = self.micro_idx >= accum
+                if accum > 1:
+                    loss = loss / accum
+                    if not last_micro and self.distributed:
+                        with self.model.no_sync():
+                            self.scaler.scale(loss).backward()
+                        continue
+                if not last_micro:
+                    self.scaler.scale(loss).backward()
+                    continue
+                self.micro_idx = 0
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)

@@ -1,12 +1,17 @@
-# Capacity sweep point: scale 20.0 (~1.65M params). Identical to
-# base_2gpu.yaml except model.scale and ckpt_dir, so the comparison is clean.
+# Capacity sweep point: scale 20.0 (~1.65M params).
+# NOTE: unlike the other sweep points this uses micro-batch 128 x accum 2 rather than 256.
+# The global batch and LR schedule are identical, but the model's 25 BatchNorm layers see
+# 128-sample statistics instead of 256 -- a small, real difference when comparing to the
+# other scales. batch 256 does not fit: it OOMs on the ~14.6 s bucket.
 model: {scale: 20.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
 data:
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 256          # per GPU -> global 512
+  batch_size: 128          # per GPU; with accum_steps 2 -> global 512, unchanged.
+                           # 256 OOMs at this size: the longest bucket is ~14.6 s,
+                           # ~3x the mean, and peak memory follows the longest.
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
   loader_threads: 0        # MEASURED HARMFUL: the thread pool costs 3x (47 -> 146 ms/step).
@@ -46,6 +51,7 @@ optim:
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
+  accum_steps: 2           # keeps global batch at 512 with half the activation memory
   warmup_steps: 1000
   max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
   min_lr_ratio: 0.01
