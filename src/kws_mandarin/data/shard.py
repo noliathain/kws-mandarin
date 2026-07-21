@@ -224,7 +224,7 @@ def _threaded_map(fn, iterable, num_threads: int):
                 yield res
 
 
-def _interleave_shards(paths: list[str], num_streams: int):
+def _interleave_shards(paths: list[str], num_streams: int, read=None):
     """Read ``num_streams`` shards concurrently, yielding their raw items interleaved.
 
     Reading shards one at a time makes training I/O-bound: the storage mount delivers only
@@ -236,11 +236,12 @@ def _interleave_shards(paths: list[str], num_streams: int):
     q: queue.Queue = queue.Queue(maxsize=num_streams * 64)
     stop = threading.Event()
     done = object()
+    read = read or _iter_shard_raw
 
     def reader(mine: list[str]) -> None:
         try:
             for p in mine:
-                for item in _iter_shard_raw(p):
+                for item in read(p):
                     while not stop.is_set():
                         try:
                             q.put(item, timeout=0.5)
@@ -292,6 +293,7 @@ class ShardDataset(IterableDataset):
         bucket_size: int = 0,
         batch_size: int = 0,
         read_streams: int = 0,
+        cache_in_ram: bool = False,
     ):
         super().__init__()
         self.shards = list(shards)
@@ -317,9 +319,26 @@ class ShardDataset(IterableDataset):
         # desync the gradient all-reduce. Training is bounded by max_steps instead of epochs.
         self.infinite = infinite
         self.epoch = 0
+        self.pass_idx = 0
+        # Hold every shard's raw (undecoded) items in RAM after the first pass. The corpus is
+        # ~17 GB against 216 GB of RAM, and a training run sweeps it ~64 times: paying the tar
+        # parse and the mount read once removes both the cost AND its variance. Variance is
+        # what actually hurts under DDP, where every step waits for the slowest rank.
+        self._ram: dict[str, list] | None = {} if cache_in_ram else None
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
+
+    def _read_shard(self, path: str):
+        """Raw items for one shard, from RAM when cached."""
+        if self._ram is None:
+            yield from _iter_shard_raw(path)
+            return
+        items = self._ram.get(path)
+        if items is None:
+            items = list(_iter_shard_raw(path))
+            self._ram[path] = items      # dict assignment is atomic; a racing reader at worst
+        yield from items                 # parses the same shard twice, once, harmlessly
 
     def _my_shards(self, pass_idx: int = 0) -> list[str]:
         info = get_worker_info()
@@ -349,9 +368,10 @@ class ShardDataset(IterableDataset):
     def _samples(self, pass_idx: int = 0):
         my_shards = self._my_shards(pass_idx)
         if self.read_streams and self.read_streams > 1:
-            raw_stream = _interleave_shards(my_shards, min(self.read_streams, len(my_shards)))
+            raw_stream = _interleave_shards(my_shards, min(self.read_streams, len(my_shards)),
+                                            read=self._read_shard)
         else:
-            raw_stream = (raw for shard in my_shards for raw in _iter_shard_raw(shard))
+            raw_stream = (raw for shard in my_shards for raw in self._read_shard(shard))
         if self.num_threads and self.num_threads > 1:
             yield from _threaded_map(self._process, raw_stream, self.num_threads)
         else:
@@ -361,13 +381,16 @@ class ShardDataset(IterableDataset):
                     yield s
 
     def _all_samples(self):
-        """One pass over this reader's shards, or endless reshuffled passes if infinite."""
-        pass_idx = 0
+        """One pass over this reader's shards, or endless reshuffled passes if infinite.
+
+        ``pass_idx`` is checkpointed: resuming a run without it restarts the stream at pass 0,
+        which replays exactly the data the interrupted run already trained on.
+        """
         while True:
-            yield from self._samples(pass_idx)
+            yield from self._samples(self.pass_idx)
             if not self.infinite:
                 return
-            pass_idx += 1
+            self.pass_idx += 1
 
     def _bucketed(self, rng):
         """Length bucketing: fill a pool, sort by duration, emit in batch-sized groups whose

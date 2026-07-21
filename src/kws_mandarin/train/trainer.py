@@ -16,6 +16,9 @@ from __future__ import annotations
 import copy
 import glob
 import os
+import queue
+import signal
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -57,6 +60,54 @@ def _dl_worker_init(_worker_id: int) -> None:
     torch.multiprocessing.set_sharing_strategy("file_system")
 
 
+def _prefetch(iterable, depth: int = 4):
+    """Yield from ``iterable`` on a background thread, keeping ``depth`` batches ready.
+
+    Without this the step is strictly serial — fetch, compute, fetch — so the GPU idles for
+    the whole fetch. A thread (not a worker process) because this container's DataLoader
+    worker->main shared-memory transfer is unreliable; the loader's work is I/O and numpy,
+    both of which release the GIL. Under DDP the win is larger than it looks: every step
+    costs the SLOWEST rank, so absorbing per-rank load jitter helps both ranks.
+    """
+    q: queue.Queue = queue.Queue(maxsize=depth)
+    stop = threading.Event()
+    done = object()
+
+    def producer() -> None:
+        try:
+            for item in iterable:
+                while not stop.is_set():
+                    try:
+                        q.put(item, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+        except Exception as exc:      # surface loader failures instead of hanging the consumer
+            q.put(exc)
+        finally:
+            q.put(done)
+
+    thread = threading.Thread(target=producer, daemon=True)
+    thread.start()
+    try:
+        while True:
+            item = q.get()
+            if item is done:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
+        while thread.is_alive():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+
+
 class Trainer:
     def __init__(self, config: TrainConfig, tokenizer=None, train_dataset=None, dev_utts=None):
         self.cfg = config
@@ -71,6 +122,23 @@ class Trainer:
 
         self.step = 0
         self.best_metric = float("inf")
+        self.n_bad_loss = 0
+        self.median_step = 0.0
+        # Preemption (or a plain Ctrl-C / tmux kill) otherwise discards everything since the
+        # last validation — up to val_every steps.
+        self._stop_requested = False
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, self._request_stop)
+            except ValueError:
+                pass          # not on the main thread (tests) — nothing to install
+
+    def _request_stop(self, _signum, _frame) -> None:
+        if self._stop_requested:
+            raise KeyboardInterrupt("second signal — exiting immediately")
+        print(f"\n>> signal received at step {self.step}; finishing this step then "
+              f"checkpointing (signal again to abort now)", flush=True)
+        self._stop_requested = True
 
     # -- setup ---------------------------------------------------------------------------
 
@@ -195,6 +263,7 @@ class Trainer:
                 bucket_size=d.bucket_size,
                 batch_size=d.batch_size,
                 read_streams=d.read_streams,
+                cache_in_ram=d.cache_in_ram,
             )
         return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
 
@@ -345,15 +414,27 @@ class Trainer:
                 self.sampler.set_epoch(epoch)
             elif hasattr(self.train_dataset, "set_epoch"):
                 self.train_dataset.set_epoch(epoch)  # reshuffle shards each epoch
-            for batch in self.loader:
-                if self.step >= max_steps:
+            for batch in _prefetch(self.loader, depth=self.cfg.data.prefetch_factor or 2):
+                if self.step >= max_steps or self._stop_requested:
                     break
+                step_started = time.time()
                 self.optimizer.zero_grad(set_to_none=True)
                 if amp_dtype is not None:
                     with torch.autocast(device_type="cuda", dtype=amp_dtype):
                         loss = self._loss_from_batch(batch)
                 else:
                     loss = self._loss_from_batch(batch)
+
+                if not torch.isfinite(loss):
+                    # One non-finite loss backpropagates NaN into every weight and the run is
+                    # dead from then on, silently. Skip the batch and say so.
+                    self.n_bad_loss += 1
+                    if self.is_main:
+                        print(f"WARNING step {self.step}: non-finite loss ({loss.item()}), "
+                              f"batch skipped ({self.n_bad_loss} so far)", flush=True)
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.step += 1
+                    continue
 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -364,6 +445,15 @@ class Trainer:
                 self._update_ema()
 
                 self.step += 1
+                # Stall watchdog. Silent hangs (a wedged loader thread, a stuck collective)
+                # previously cost hours before anyone noticed the log had simply stopped.
+                elapsed = time.time() - step_started
+                if self.median_step > 0 and elapsed > max(30.0, 10 * self.median_step):
+                    print(f"WARNING step {self.step} took {elapsed:.1f}s "
+                          f"(median {self.median_step:.2f}s) — pipeline stalled?", flush=True)
+                self.median_step = elapsed if self.median_step == 0 else (
+                    0.98 * self.median_step + 0.02 * elapsed)
+
                 if self.is_main and self.step % self.cfg.log_every == 0:
                     rate = self.cfg.log_every / (time.time() - t0)
                     lr = self.scheduler.get_last_lr()[0]
@@ -374,7 +464,13 @@ class Trainer:
                 if self.step % self.cfg.val_every == 0:
                     self.validate_and_checkpoint()
                     self.model.train()
+            if self._stop_requested:
+                break
             epoch += 1
+        if self._stop_requested and self.is_main:
+            print(f"stopping at step {self.step} on signal; checkpointing", flush=True)
+            self.validate_and_checkpoint()
+            self.model.train()
         if self.is_main:
             self.validate_and_checkpoint()
         if self.distributed:
@@ -407,6 +503,9 @@ class Trainer:
         return {
             "step": self.step,
             "best_metric": self.best_metric,
+            # Where the shard stream had got to. Without it a resumed run restarts at pass 0
+            # and re-trains on exactly the data the interrupted run already saw.
+            "data_pass": getattr(self.train_dataset, "pass_idx", 0),
             "model": self.raw_model.state_dict(),
             "ema": self.ema.state_dict() if self.ema is not None else None,
             "optimizer": self.optimizer.state_dict(),
@@ -437,3 +536,5 @@ class Trainer:
         self.scaler.load_state_dict(ckpt["scaler"])
         self.step = ckpt["step"]
         self.best_metric = ckpt["best_metric"]
+        if hasattr(self.train_dataset, "pass_idx"):
+            self.train_dataset.pass_idx = ckpt.get("data_pass", 0)

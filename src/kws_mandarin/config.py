@@ -79,6 +79,9 @@ class DataConfig:
     read_streams: int = 0          # >1: read this many shards concurrently. The storage mount
                                    # is ~34 MB/s single-stream but ~285 MB/s at 16 streams, and
                                    # sequential shard reads were 90% of the training step.
+    cache_in_ram: bool = False     # hold every shard's raw bytes in RAM after the first pass.
+                                   # The corpus is ~17 GB against 216 GB, and a run sweeps it
+                                   # ~64 times: removes the re-read AND its step-time variance.
     bucket_size: int = 0           # >0: length-bucket this many samples before batching, so
                                    # batches are length-homogeneous (much less padding waste)
     max_duration_s: float = 16.0  # drop utterances longer than this

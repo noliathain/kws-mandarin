@@ -1,4 +1,5 @@
 import io
+import os
 import time
 
 import pytest
@@ -225,3 +226,35 @@ def test_interleave_shards_stops_readers_when_consumer_quits(tmp_path):
             break
         time.sleep(0.05)
     assert threading.active_count() <= before, "reader threads leaked after consumer stopped"
+
+
+def test_ram_cache_serves_second_pass_without_touching_disk(tmp_path):
+    # The corpus is ~17 GB against 216 GB of RAM and a run sweeps it ~64 times. Re-reading it
+    # every pass costs time and, worse, adds step-time variance -- which under DDP is paid by
+    # BOTH ranks, since every step waits for the slowest. Pass 2 must not re-read the shards.
+    utts = _corpus(tmp_path, 16)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=4, workers=1, fmt="pcm")
+    tok = PinyinTokenizer()
+
+    ds = ShardDataset(shards, tok, shuffle_buffer=1, shuffle_shards=False, infinite=True,
+                      cache_in_ram=True)
+    it = iter(ds)
+    first = [next(it)["utt_id"] for _ in range(16)]
+
+    for shard in shards:              # make the files unreadable: RAM must be the only source
+        os.chmod(shard, 0o000)
+    try:
+        second = [next(it)["utt_id"] for _ in range(16)]
+    finally:
+        for shard in shards:
+            os.chmod(shard, 0o644)
+    assert sorted(second) == sorted(first)      # same corpus, served from memory
+
+
+def test_ram_cache_is_off_by_default(tmp_path):
+    # Caching the corpus costs GB of RAM; a caller that did not ask for it must not pay.
+    utts = _corpus(tmp_path, 4)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=2, workers=1)
+    ds = ShardDataset(shards, PinyinTokenizer(), shuffle_buffer=1)
+    list(ds)
+    assert ds._ram is None

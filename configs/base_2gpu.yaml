@@ -13,7 +13,8 @@ data:
                            # mount does 34 MB/s on one stream, 285 MB/s at 16; a step eats
                            # ~41 MB, so sequential reads cost 1.15 s/step = 90% of the step.
                            # Measured: 1151 -> 141 ms/step. 4 ties this, 16 is slightly worse.
-  prefetch_factor: 2
+  prefetch_factor: 4       # batches held ready by the background prefetch thread
+  cache_in_ram: true       # ~8.5 GB/rank; after pass 1 there is no mount read or tar parse
   bucket_size: 2048        # length-bucket 8 batches' worth, then emit batches in shuffled order
                            # -> batches are length-homogeneous, so almost no padded compute
 aug:

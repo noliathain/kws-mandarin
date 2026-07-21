@@ -158,3 +158,93 @@ def test_ema_warmup_tracks_the_model_early(tmp_path):
     got = torch.stack([p.mean() for p in trainer.ema.parameters()]).mean().item()
     # a constant 0.999 decay would have moved only 1 - 0.999^20 = 2% of the way
     assert got > 0.75, f"EMA still {got:.3f} of the way to the model after 20 steps"
+
+
+def test_prefetch_overlaps_loading_with_consumption():
+    # The step was strictly serial -- fetch, compute, fetch -- so the GPU idled through every
+    # fetch. Prefetching must let production and consumption proceed at the same time.
+    import time
+
+    from kws_mandarin.train.trainer import _prefetch
+
+    def slow_source():
+        for i in range(8):
+            time.sleep(0.05)
+            yield i
+
+    t0 = time.perf_counter()
+    for _ in _prefetch(slow_source(), depth=4):
+        time.sleep(0.05)                       # "compute" as long as the "load"
+    overlapped = time.perf_counter() - t0
+    # serial would be 8*(0.05+0.05) = 0.8s; overlapped approaches 8*0.05 = 0.4s
+    assert overlapped < 0.65, f"no overlap: {overlapped:.2f}s"
+
+
+def test_prefetch_propagates_loader_errors():
+    # A crash in the loader must reach the training loop. Swallowing it would leave the
+    # consumer waiting on a queue that will never be filled -- a silent hang.
+    import pytest
+
+    from kws_mandarin.train.trainer import _prefetch
+
+    def broken():
+        yield 1
+        raise RuntimeError("shard exploded")
+
+    with pytest.raises(RuntimeError, match="shard exploded"):
+        list(_prefetch(broken(), depth=2))
+
+
+def test_prefetch_stops_producer_when_consumer_quits():
+    # max_steps ends the loop mid-stream. The producer must not stay blocked on a full queue.
+    import threading
+    import time
+
+    from kws_mandarin.train.trainer import _prefetch
+
+    before = threading.active_count()
+    gen = _prefetch(iter(range(10_000)), depth=2)
+    next(gen)
+    gen.close()
+    for _ in range(100):
+        if threading.active_count() <= before:
+            break
+        time.sleep(0.05)
+    assert threading.active_count() <= before, "prefetch thread leaked"
+
+
+def test_nonfinite_loss_is_skipped_not_backpropagated(tmp_path):
+    # A single NaN loss propagates NaN into every weight and the run is dead from then on,
+    # silently. The step must be skipped and the model left finite.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.optim.max_steps = 3
+    cfg.val_every = 10_000
+    trainer = Trainer(cfg)
+    trainer._loss_from_batch = lambda batch: torch.tensor(float("nan"), requires_grad=True)
+
+    trainer.train(resume=False)
+    assert trainer.n_bad_loss == 3                        # every step was rejected
+    assert all(torch.isfinite(p).all() for p in trainer.raw_model.parameters())
+
+
+def test_checkpoint_round_trips_the_data_stream_position(tmp_path):
+    # Resuming without the shard-stream position restarts at pass 0, re-training on exactly
+    # the data the interrupted run already consumed. Only ShardDataset has this position.
+    from kws_mandarin.data import write_shards
+
+    train_m, dev_m = _corpus(tmp_path)
+    from kws_mandarin.data.manifest import read_manifest
+    shards = write_shards(read_manifest(train_m), str(tmp_path / "sh"), num_shards=2, workers=1)
+
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.data.train_shards = str(tmp_path / "sh" / "*.tar")
+    trainer = Trainer(cfg)
+    assert trainer.train_dataset.pass_idx == 0
+    trainer.train_dataset.pass_idx = 7
+    trainer.save_checkpoint("latest.pt")
+
+    fresh = Trainer(cfg)
+    assert fresh.train_dataset.pass_idx == 0
+    fresh.load_checkpoint(tmp_path / "ckpt" / "latest.pt")
+    assert fresh.train_dataset.pass_idx == 7, "resumed run would replay data already trained on"
