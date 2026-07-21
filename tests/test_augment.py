@@ -116,3 +116,37 @@ def test_waveform_augment_can_be_disabled():
     aug = WaveformAugment(p_noise=0.0, p_rir=0.0, p_speed=0.0, p_gain=0.0)
     wav = torch.randn(16000)
     assert torch.equal(aug(wav), wav)  # all probs 0 -> identity
+
+
+def test_add_noise_batch_hits_target_snr_per_item():
+    # The GPU noise path must mix at the SNR it was asked for, per utterance — otherwise the
+    # SNR curriculum is meaningless and the model trains on the wrong noise distribution.
+    from kws_mandarin.data.augment import add_noise_batch
+
+    torch.manual_seed(0)
+    wavs = torch.randn(4, 16000)
+    noises = torch.randn(4, 16000) * 7.0           # arbitrary level; mixing must rescale it
+    snr = torch.tensor([0.0, 5.0, 10.0, 20.0])
+    out = add_noise_batch(wavs, noises, snr)
+
+    added = out - wavs
+    meas = 10 * torch.log10(wavs.pow(2).mean(1) / added.pow(2).mean(1))
+    assert torch.allclose(meas, snr, atol=0.05)
+
+
+def test_add_noise_batch_measures_snr_over_valid_frames_only():
+    # With padded batches, signal power must be measured over real speech, not the zeros:
+    # counting padding deflates signal power and silently over-noises short utterances.
+    from kws_mandarin.data.augment import add_noise_batch
+
+    torch.manual_seed(0)
+    wav = torch.randn(16000)
+    padded = torch.zeros(1, 48000)
+    padded[0, :16000] = wav
+    noises = torch.randn(1, 48000)
+    snr = torch.tensor([10.0])
+
+    out = add_noise_batch(padded, noises, snr, lengths=torch.tensor([16000]))
+    added = (out - padded)[0, :16000]
+    meas = 10 * torch.log10(wav.pow(2).mean() / added.pow(2).mean())
+    assert abs(meas.item() - 10.0) < 0.3   # loose: noise power is estimated over the full row

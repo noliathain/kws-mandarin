@@ -78,6 +78,25 @@ def apply_rir(wav: Tensor, rir: Tensor) -> Tensor:
     return conv[peak : peak + n]
 
 
+def add_noise_batch(wavs: Tensor, noises: Tensor, snr_db: Tensor,
+                    lengths: Tensor | None = None) -> Tensor:
+    """Batched additive noise at per-clip target SNR, on-device (for GPU augmentation).
+
+    ``wavs`` (B, T), ``noises`` (B, T), ``snr_db`` (B,). ``lengths`` (B,) restricts the signal
+    power estimate to valid frames so padding doesn't deflate it (which would otherwise make
+    padded clips far too noisy).
+    """
+    if lengths is None:
+        sig = wavs.pow(2).mean(dim=1)
+    else:
+        m = (torch.arange(wavs.shape[1], device=wavs.device)[None, :]
+             < lengths.to(wavs.device)[:, None]).to(wavs.dtype)
+        sig = (wavs.pow(2) * m).sum(dim=1) / m.sum(dim=1).clamp_min(1.0)
+    noise_pow = noises.pow(2).mean(dim=1).clamp_min(1e-10)
+    scale = (sig.clamp_min(1e-10) / (noise_pow * 10.0 ** (snr_db / 10.0))).sqrt()
+    return wavs + scale.unsqueeze(1) * noises
+
+
 def apply_rir_batch(wavs: Tensor, rirs: Tensor) -> Tensor:
     """Batched RIR convolution on-device (for GPU augmentation).
 

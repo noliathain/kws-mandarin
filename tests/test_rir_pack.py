@@ -95,9 +95,11 @@ def test_pack_noise_crops_long_and_roundtrips(tmp_path):
     sf.write(str(d / "long.wav"), (torch.randn(40 * 16000) * 0.1).numpy(), 16000)   # 40 s
     out = str(tmp_path / "noise.pt")
     n = pack_noise(d.as_posix(), out, max_seconds=15.0)
-    assert n == 2
-    lens = sorted(x.numel() for x in load_noise_pack(out))
-    assert lens == [8000, 15 * 16000]   # long cropped to 15 s, short kept intact
+    assert n == 1                       # 0.5 s clip dropped: tiled to utterance length it buzzes
+    assert [x.numel() for x in load_noise_pack(out)] == [15 * 16000]   # long cropped to 15 s
+
+    n = pack_noise(d.as_posix(), out, max_seconds=15.0, min_seconds=0.0)
+    assert sorted(x.numel() for x in load_noise_pack(out)) == [8000, 15 * 16000]
 
 
 def test_waveform_augment_uses_noise_pack_in_memory(tmp_path):
@@ -127,3 +129,21 @@ def test_waveform_augment_uses_packed_rirs_in_memory(tmp_path):
     out_wav = aug(wav)
     assert out_wav.numel() == 16000 and torch.isfinite(out_wav).all()
     assert not torch.equal(out_wav, wav)  # reverb was actually applied
+
+
+def test_pack_noise_crops_on_disk_not_just_in_view(tmp_path):
+    # torch.save serializes a tensor's whole storage, so saving slices would write every clip's
+    # full-length audio -- a 15 s crop of 3-minute MUSAN files ballooned the pack ~30x.
+    import soundfile as sf
+
+    from kws_mandarin.data.rir_pack import load_noise_pack, pack_noise
+
+    src = tmp_path / "noise"
+    src.mkdir()
+    for i in range(4):
+        sf.write(str(src / f"n{i}.wav"), (torch.randn(16000 * 30) * 0.1).numpy(), 16000)
+
+    out = tmp_path / "noise.pt"
+    assert pack_noise(str(src), str(out), max_items=4, max_seconds=2.0) == 4
+    assert all(n.numel() == 32000 for n in load_noise_pack(str(out)))
+    assert out.stat().st_size < 4 * 32000 * 4 * 2      # ~cropped size, not 30 s per clip

@@ -53,17 +53,31 @@ class LogMelFrontend(nn.Module):
     def num_frames(self, num_samples: int) -> int:
         return 1 + num_samples // self.hop_length
 
-    def forward(self, wav: Tensor) -> Tensor:
-        """``wav`` (B, N) or (B, 1, N) float in [-1, 1] -> log-mel (B, n_mels, T)."""
+    def forward(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
+        """``wav`` (B, N) or (B, 1, N) float in [-1, 1] -> log-mel (B, n_mels, T).
+
+        ``lengths`` (B,) = valid sample counts. When given, CMVN statistics are computed over
+        *valid frames only* and padding is zeroed — otherwise a 4 s clip padded to 14 s has its
+        mean/std dominated by silence, distorting the real speech.
+        """
         if wav.dim() == 3:
             wav = wav.squeeze(1)
         if wav.dim() != 2:
             raise ValueError(f"expected (B, N) or (B, 1, N), got shape {tuple(wav.shape)}")
         mel = self.mel(wav)                       # (B, n_mels, T)
         feat = torch.log(mel + self.log_eps)
-        if self.per_utt_norm:
-            # CMVN over time, per utterance — stabilises to channel/gain shifts.
+        if not self.per_utt_norm:
+            return feat
+        if lengths is None:
             mean = feat.mean(dim=-1, keepdim=True)
             std = feat.std(dim=-1, keepdim=True).clamp_min(1e-5)
-            feat = (feat - mean) / std
-        return feat
+            return (feat - mean) / std
+        # masked CMVN: stats over valid frames only
+        frames = (1 + lengths.to(feat.device) // self.hop_length).clamp(max=feat.shape[-1])
+        m = (torch.arange(feat.shape[-1], device=feat.device)[None, :] < frames[:, None])
+        m = m.unsqueeze(1).to(feat.dtype)         # (B, 1, T)
+        cnt = m.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        mean = (feat * m).sum(dim=-1, keepdim=True) / cnt
+        var = (((feat - mean) * m) ** 2).sum(dim=-1, keepdim=True) / cnt
+        feat = (feat - mean) / var.sqrt().clamp_min(1e-5)
+        return feat * m                            # zero padding so the encoder sees clean zeros

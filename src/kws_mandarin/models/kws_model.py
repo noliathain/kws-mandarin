@@ -37,16 +37,20 @@ class KWSModel(nn.Module):
         )
         self.head = CTCHead(self.encoder.enc_dim, vocab_size)
 
-    def forward(self, wav: Tensor) -> Tensor:
-        """``wav`` (B, N) or (B, 1, N) -> logits (B, T, V)."""
-        feats = self.frontend(wav)          # (B, n_mels, T)
+    def forward(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
+        """``wav`` (B, N) or (B, 1, N) -> logits (B, T, V).
+
+        ``lengths`` (B,) valid sample counts enable masked CMVN (padding excluded from the
+        normalization statistics).
+        """
+        feats = self.frontend(wav, lengths)  # (B, n_mels, T)
         if self.spec_augment is not None:
             feats = self.spec_augment(feats)  # train-time masking (identity in eval)
         enc = self.encoder(feats)           # (B, T, D)
         return self.head(enc)               # (B, T, V)
 
-    def log_probs(self, wav: Tensor) -> Tensor:
-        return self.forward(wav).log_softmax(dim=-1)
+    def log_probs(self, wav: Tensor, lengths: Tensor | None = None) -> Tensor:
+        return self.forward(wav, lengths).log_softmax(dim=-1)
 
     def output_lengths(self, input_samples: Tensor) -> Tensor:
         frames = 1 + input_samples // self.frontend.hop_length

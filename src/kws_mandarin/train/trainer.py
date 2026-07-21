@@ -28,7 +28,15 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 
 from ..config import TrainConfig
-from ..data import KWSDataset, ShardDataset, SpecAugment, WaveformAugment, apply_rir_batch, collate_kws
+from ..data import (
+    KWSDataset,
+    ShardDataset,
+    SpecAugment,
+    WaveformAugment,
+    add_noise_batch,
+    apply_rir_batch,
+    collate_kws,
+)
 from ..data.manifest import read_manifest
 from ..loss import CTCLoss
 from ..models import KWSModel
@@ -123,29 +131,49 @@ class Trainer:
         a = self.cfg.aug
         if not a.enabled:
             return None
-        # When RIR runs on the GPU, don't also do it per-clip on the CPU (rir_pack=None,p_rir=0).
+        # Stages that run on the GPU are disabled here so they aren't also applied per-clip on CPU.
         return WaveformAugment.from_dirs(
-            a.musan_dir, a.rir_dir, sample_rate=self.cfg.data.sample_rate,
-            rir_pack=(None if a.gpu_rir else a.rir_pack), noise_pack=a.noise_pack,
+            (None if a.gpu_noise else a.musan_dir), a.rir_dir,
+            sample_rate=self.cfg.data.sample_rate,
+            rir_pack=(None if a.gpu_rir else a.rir_pack),
+            noise_pack=(None if a.gpu_noise else a.noise_pack),
             snr_db_range=(a.snr_db_min, a.snr_db_max),
-            p_noise=a.p_noise, p_rir=(0.0 if a.gpu_rir else a.p_rir),
+            p_noise=(0.0 if a.gpu_noise else a.p_noise),
+            p_rir=(0.0 if a.gpu_rir else a.p_rir),
             p_speed=a.p_speed, p_gain=a.p_gain,
             seed=self.cfg.seed + self.rank,
         )
 
     def _build_gpu_rirs(self) -> None:
-        """Load the RIR pack into one padded (N, Lmax) tensor on-device for batched GPU reverb."""
+        """Load RIR / noise packs onto the device as dense banks for batched GPU augmentation."""
         a = self.cfg.aug
+        sr = self.cfg.data.sample_rate
         self.gpu_rirs = None
-        if a.enabled and a.gpu_rir and a.rir_pack:
+        self.gpu_noises = None
+        if not a.enabled:
+            return
+        if a.gpu_rir and a.rir_pack:
             from ..data import load_rir_pack
 
-            rirs = load_rir_pack(a.rir_pack, sample_rate=self.cfg.data.sample_rate)
+            rirs = load_rir_pack(a.rir_pack, sample_rate=sr)
             lmax = max(r.numel() for r in rirs)
             padded = torch.zeros(len(rirs), lmax)
             for i, r in enumerate(rirs):
                 padded[i, : r.numel()] = r
             self.gpu_rirs = padded.to(self.device)
+        if a.gpu_noise and a.noise_pack:
+            from ..data import load_noise_pack
+
+            noises = load_noise_pack(a.noise_pack, sample_rate=sr)
+            # Tile every clip to a common length >= any batch, so a random crop always exists.
+            length = int(self.cfg.data.max_duration_s * sr)
+            bank = torch.zeros(len(noises), length)
+            for i, n in enumerate(noises):
+                if n.numel() == 0:
+                    continue
+                reps = (length + n.numel() - 1) // n.numel()
+                bank[i] = n.repeat(reps)[:length]
+            self.gpu_noises = bank.to(self.device)
 
     def _make_train_dataset(self):
         d = self.cfg.data
@@ -163,6 +191,8 @@ class Trainer:
                 # the epoch-boundary desync/hang from unevenly-split shards across ranks.
                 infinite=self.distributed,
                 num_threads=d.loader_threads,
+                bucket_size=d.bucket_size,
+                batch_size=d.batch_size,
             )
         return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
 
@@ -215,24 +245,44 @@ class Trainer:
 
     # -- training ------------------------------------------------------------------------
 
-    def _gpu_augment(self, wavs: torch.Tensor) -> torch.Tensor:
-        """Batched GPU reverb: convolve a random p_rir fraction of the batch with random RIRs."""
-        if self.gpu_rirs is None or not self.raw_model.training:
+    def _gpu_augment(self, wavs: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+        """Batched GPU augmentation, in physically-correct order for far-field robustness:
+        reverberate the clean signal in a room (RIR), THEN add that room's ambient noise at a
+        sampled SNR. Each stage hits an independent random fraction of the batch.
+        """
+        if not self.raw_model.training:
             return wavs
-        b = wavs.shape[0]
-        apply = torch.rand(b, device=wavs.device) < self.cfg.aug.p_rir
-        if not bool(apply.any()):
-            return wavs
-        idx = torch.randint(0, self.gpu_rirs.shape[0], (b,), device=wavs.device)
-        reverbed = apply_rir_batch(wavs, self.gpu_rirs[idx])
-        return torch.where(apply.unsqueeze(1), reverbed, wavs)
+        a = self.cfg.aug
+        b, t = wavs.shape
+        dev = wavs.device
+
+        if self.gpu_rirs is not None and a.p_rir > 0:
+            hit = torch.rand(b, device=dev) < a.p_rir
+            if bool(hit.any()):
+                idx = torch.randint(0, self.gpu_rirs.shape[0], (b,), device=dev)
+                wavs = torch.where(hit.unsqueeze(1), apply_rir_batch(wavs, self.gpu_rirs[idx]), wavs)
+
+        if self.gpu_noises is not None and a.p_noise > 0:
+            hit = torch.rand(b, device=dev) < a.p_noise
+            if bool(hit.any()):
+                bank_n, bank_len = self.gpu_noises.shape
+                idx = torch.randint(0, bank_n, (b,), device=dev)
+                max_off = max(1, bank_len - t + 1)
+                off = torch.randint(0, max_off, (b,), device=dev)
+                pos = (off.unsqueeze(1) + torch.arange(t, device=dev)).clamp(max=bank_len - 1)
+                noise = self.gpu_noises[idx].gather(1, pos)          # (B, T) random crops
+                snr = torch.empty(b, device=dev).uniform_(a.snr_db_min, a.snr_db_max)
+                noisy = add_noise_batch(wavs, noise, snr, lengths)
+                wavs = torch.where(hit.unsqueeze(1), noisy, wavs)
+        return wavs
 
     def _loss_from_batch(self, batch) -> torch.Tensor:
         wavs = batch["wavs"].to(self.device, non_blocking=True)
-        wavs = self._gpu_augment(wavs)
+        wav_lengths = batch["wav_lengths"]
+        wavs = self._gpu_augment(wavs, wav_lengths)
         targets = batch["targets"].to(self.device, non_blocking=True)
-        input_lengths = self.raw_model.output_lengths(batch["wav_lengths"])  # CPU
-        logits = self.model(wavs)
+        input_lengths = self.raw_model.output_lengths(wav_lengths)  # CPU
+        logits = self.model(wavs, wav_lengths)
         return self.criterion(logits, targets, input_lengths, batch["target_lengths"])
 
     def _update_ema(self) -> None:

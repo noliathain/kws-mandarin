@@ -10,16 +10,19 @@ data:
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
   loader_threads: 0        # soundfile FLAC decode holds the GIL here, so threads don't help
   prefetch_factor: 2
+  bucket_size: 2048        # length-bucket 8 batches' worth, then emit batches in shuffled order
+                           # -> batches are length-homogeneous, so almost no padded compute
 aug:
   enabled: true
   musan_dir: null
   rir_dir: null
-  noise_pack: null         # MUSAN noise added later once packed
+  noise_pack: /teamspace/lightning_storage/kws-mandarin/musan.pt
   rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
   gpu_rir: true            # RIR reverb applied on-GPU (batched) in the training step
+  gpu_noise: true          # MUSAN noise/music/babble mixed on-GPU at sampled SNR, after reverb
   snr_db_min: 0.0
   snr_db_max: 20.0
-  p_noise: 0.0
+  p_noise: 0.6
   p_rir: 0.5               # fraction of each batch to reverb (on GPU)
   p_speed: 0.5
   p_gain: 0.5

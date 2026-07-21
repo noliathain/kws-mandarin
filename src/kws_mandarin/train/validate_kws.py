@@ -94,7 +94,7 @@ def run_validation(
         for i, w in enumerate(wavs):
             batch[i, : w.numel()] = w.to(device)
 
-        logits = model(batch)                        # (B, T, V)
+        logits = model(batch, lengths)               # (B, T, V) — masked CMVN
         log_probs = logits.log_softmax(-1)
         out_lens = model.output_lengths(lengths)     # (B,) on CPU
 

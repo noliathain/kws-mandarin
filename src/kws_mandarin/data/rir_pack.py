@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import random
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import soundfile as sf
@@ -75,8 +76,24 @@ def load_rir_pack(path: str, sample_rate: int | None = None) -> list[Tensor]:
     return obj["rirs"]
 
 
+def _load_cropped(args: tuple):
+    """Worker: load one clip and crop to max_len (module-level so it is picklable)."""
+    path, sample_rate, max_len, min_len = args
+    try:
+        r = _load(Path(path), sample_rate)
+    except Exception:
+        return None
+    if r.numel() < min_len:
+        return None  # too short: tiling a sub-second clip to utterance length makes a periodic
+                     # buzz, which is an artifact to memorize rather than noise to be robust to
+    # .clone() is load-bearing: a slice shares the full source storage, and torch.save
+    # serializes whole storages -- saving views would write every clip's UNcropped audio.
+    return r[:max_len].clone() if r.numel() > max_len else r
+
+
 def pack_noise(noise_dir: str, out_path: str, max_items: int = 1000,
-               sample_rate: int = 16000, max_seconds: float = 15.0, seed: int = 0) -> int:
+               sample_rate: int = 16000, max_seconds: float = 15.0, seed: int = 0,
+               workers: int = 1, min_seconds: float = 1.0) -> int:
     """Pack a MUSAN-style noise subset into one .pt loaded into RAM (FUSE-proof augmentation).
 
     Same rationale as ``pack_rirs``: reading thousands of small noise files off an S3-FUSE
@@ -90,15 +107,15 @@ def pack_noise(noise_dir: str, out_path: str, max_items: int = 1000,
     if len(paths) > max_items:
         paths = rng.sample(paths, max_items)
     max_len = int(max_seconds * sample_rate)
-    noises: list[Tensor] = []
-    for p in paths:
-        try:
-            r = _load(p, sample_rate)
-        except Exception:
-            continue
-        if r.numel() == 0:
-            continue
-        noises.append(r[:max_len] if r.numel() > max_len else r)
+    min_len = max(1, int(min_seconds * sample_rate))
+    tasks = [(str(p), sample_rate, max_len, min_len) for p in paths]
+    if workers > 1:
+        # Parallel reads: serial loading of thousands of small files off FUSE is glacial.
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_load_cropped, tasks, chunksize=8))
+    else:
+        results = [_load_cropped(t) for t in tasks]
+    noises: list[Tensor] = [r for r in results if r is not None]
     if not noises:
         raise RuntimeError(f"no readable noise in {noise_dir}")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -125,10 +142,14 @@ def main() -> None:
                     help="RIR mode: skip files longer than this (isotropic noise, not RIRs)")
     ap.add_argument("--max-noise-seconds", type=float, default=15.0,
                     help="noise mode: crop clips longer than this")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="noise mode: parallel readers (serial FUSE reads are glacial)")
+    ap.add_argument("--min-noise-seconds", type=float, default=1.0,
+                    help="noise mode: drop clips shorter than this (they tile into a buzz)")
     args = ap.parse_args()
     if args.noise:
         n = pack_noise(args.rir_dir, args.out, args.max_rirs, args.sample_rate,
-                       args.max_noise_seconds, args.seed)
+                       args.max_noise_seconds, args.seed, args.workers, args.min_noise_seconds)
         print(f"packed {n} noise clips -> {args.out}")
     else:
         n = pack_rirs(args.rir_dir, args.out, args.max_rirs, args.sample_rate, args.seed,

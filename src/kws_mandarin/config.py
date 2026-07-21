@@ -32,6 +32,7 @@ class AugConfig:
     noise_pack: str | None = None  # in-memory noise .pt (preferred over musan_dir; FUSE-proof)
     gpu_rir: bool = False          # apply RIR reverb on the GPU (batched) in the training step
                                    # instead of per-clip in dataloader workers (avoids worker IPC)
+    gpu_noise: bool = False        # apply MUSAN additive noise on the GPU (batched), same reason
     snr_db_min: float = 0.0
     snr_db_max: float = 20.0
     p_noise: float = 0.6
@@ -72,6 +73,8 @@ class DataConfig:
     prefetch_factor: int = 4       # batches each worker prefetches (keeps the GPU fed)
     loader_threads: int = 0        # >0: parallelize shard decode+augment across threads
                                    # (with num_workers=0 this uses all cores, no worker IPC)
+    bucket_size: int = 0           # >0: length-bucket this many samples before batching, so
+                                   # batches are length-homogeneous (much less padding waste)
     max_duration_s: float = 16.0  # drop utterances longer than this
 
 

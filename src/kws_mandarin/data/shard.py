@@ -235,6 +235,8 @@ class ShardDataset(IterableDataset):
         min_units: int = 1,
         infinite: bool = False,
         num_threads: int = 0,
+        bucket_size: int = 0,
+        batch_size: int = 0,
     ):
         super().__init__()
         self.shards = list(shards)
@@ -248,6 +250,10 @@ class ShardDataset(IterableDataset):
         # >0: decode+augment in a thread pool (GIL-released work parallelizes across cores),
         # which is how we use all the cores without multiprocessing worker IPC.
         self.num_threads = num_threads
+        # >0 (with batch_size): length bucketing — sort a pool by duration and emit batch-sized
+        # groups, so batches are length-homogeneous and barely padded.
+        self.bucket_size = bucket_size
+        self.batch_size = batch_size
         # infinite: cycle shards forever (reshuffling each pass). Under DDP this avoids the
         # epoch-boundary hang where unevenly-split shards give ranks different step counts and
         # desync the gradient all-reduce. Training is bounded by max_steps instead of epochs.
@@ -305,11 +311,38 @@ class ShardDataset(IterableDataset):
                 return
             pass_idx += 1
 
+    def _bucketed(self, rng):
+        """Length bucketing: fill a pool, sort by duration, emit in batch-sized groups whose
+        order is shuffled. Consecutive samples then have similar length, so the collated batch
+        is padded to near the longest *in-bucket* clip instead of the longest in the corpus —
+        far less wasted compute (and less padding polluting normalization statistics).
+        """
+        pool: list[dict] = []
+        group = max(1, self.batch_size)
+        for item in self._all_samples():
+            pool.append(item)
+            if len(pool) >= self.bucket_size:
+                pool.sort(key=lambda x: x["wav"].numel())
+                groups = [pool[i:i + group] for i in range(0, len(pool), group)]
+                rng.shuffle(groups)            # keep batch order random across the epoch
+                for g in groups:
+                    yield from g
+                pool = []
+        if pool:
+            pool.sort(key=lambda x: x["wav"].numel())
+            groups = [pool[i:i + group] for i in range(0, len(pool), group)]
+            rng.shuffle(groups)
+            for g in groups:
+                yield from g
+
     def __iter__(self):
+        rng = random.Random(self.seed + self.epoch + 1)
+        if self.bucket_size and self.bucket_size > 1 and self.batch_size:
+            yield from self._bucketed(rng)
+            return
         if self.shuffle_buffer <= 1:
             yield from self._all_samples()
             return
-        rng = random.Random(self.seed + self.epoch + 1)
         buf: list[dict] = []
         for item in self._all_samples():
             buf.append(item)

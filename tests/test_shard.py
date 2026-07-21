@@ -135,3 +135,31 @@ def test_augment_hook_is_applied(tmp_path):
     marker = torch.tensor([42.0])
     ds = ShardDataset(shards, tok, shuffle_buffer=1, augment=lambda w: marker)
     assert all(torch.equal(item["wav"], marker) for item in ds)
+
+
+def test_bucketing_makes_batches_length_homogeneous(tmp_path):
+    # Bucketing exists to cut padding waste: with mixed durations in a batch, every short clip
+    # is padded to the longest one and the model burns compute on (and normalizes over) silence.
+    # Batches drawn from a length-sorted pool must be far tighter in length than random ones.
+    utts = []
+    for i in range(64):
+        dur = 0.5 + 0.05 * (i % 32)              # 0.5 s .. 2.05 s, interleaved order
+        p = tmp_path / f"b{i}.wav"
+        sf.write(str(p), (torch.randn(int(dur * 16000)) * 0.1).numpy(), 16000)
+        utts.append(Utterance(f"b{i}", str(p), "你好世界", round(dur, 3), f"S{i}", "train"))
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=2, workers=1)
+    tok = PinyinTokenizer()
+
+    def spread(ds, bs=8):
+        items = list(ds)
+        assert len(items) == len(utts)           # bucketing must not drop or duplicate samples
+        lens = [it["wav"].numel() for it in items]
+        batches = [lens[i:i + bs] for i in range(0, len(lens), bs)]
+        # mean padding waste: fraction of the padded batch that is zeros
+        return sum(1 - sum(b) / (len(b) * max(b)) for b in batches) / len(batches)
+
+    plain = spread(ShardDataset(shards, tok, shuffle_buffer=32, shuffle_shards=False, seed=0))
+    bucketed = spread(ShardDataset(shards, tok, shuffle_buffer=64, shuffle_shards=False, seed=0,
+                                   bucket_size=64, batch_size=8))
+    assert bucketed < plain / 3                  # padding waste collapses
+    assert bucketed < 0.10
