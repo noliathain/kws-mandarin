@@ -1,34 +1,38 @@
-# Single-GPU (1x H100) training config. Global batch = batch_size (one rank).
-# Augmentation assets are packed into RAM (rir_pack / noise_pack) so the input pipeline
-# never reads small files off the S3-FUSE mount.
-model:
-  scale: 3.0
-  n_mels: 40
-  causal: true
-  ssn_bands: 5
-  dropout: 0.1
-  tone_mode: final
-
+# 1x H100 run (GPU 1 is faulty: CUDA cannot create a context on it, even in isolation).
+# batch_size 512 on the single GPU keeps GLOBAL BATCH at 512, so lr 3e-3 stays matched.
+model: {scale: 3.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
 data:
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
-  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train/*.tar
-  shuffle_buffer: 256      # small -> fast first batch (no huge upfront buffer fill)
+  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
+  shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 256          # global 256 on 1 GPU; H100 80GB is far from full
-  num_workers: 4           # forkserver workers (fewer = faster startup)
-  prefetch_factor: 4
-
+  batch_size: 512          # single GPU -> global 512 (same as the 2-GPU recipe)
+  num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
+                           # transfer races randomly ("could not unlink shared memory"); 0 avoids it
+  loader_threads: 8        # PCM shards decode without holding the GIL (unlike FLAC), so the
+                           # in-process loader does scale across threads: 2.0 -> 1.2 ms/utt
+  read_streams: 8          # shards read concurrently PER RANK (16 total across 2 GPUs). The
+                           # mount does 34 MB/s on one stream, 285 MB/s at 16; a step eats
+                           # ~41 MB, so sequential reads cost 1.15 s/step = 90% of the step.
+                           # Measured: 1151 -> 141 ms/step. 4 ties this, 16 is slightly worse.
+  prefetch_factor: 2
+  bucket_size: 2048        # length-bucket 8 batches' worth, then emit batches in shuffled order
+                           # -> batches are length-homogeneous, so almost no padded compute
 aug:
   enabled: true
   musan_dir: null
   rir_dir: null
-  # noise_pack: set to a packed MUSAN .pt (and p_noise>0) once built; null = no additive noise
-  noise_pack: null
-  rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt      # in-memory RIRs
+  noise_pack: /teamspace/lightning_storage/kws-mandarin/musan.pt
+  rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
+  gpu_rir: true            # RIR reverb applied on-GPU (batched) in the training step
+  gpu_noise: true          # MUSAN noise/music/babble mixed on-GPU at sampled SNR, after reverb
+  gpu_speed: true          # 3-way speed perturbation batched on-GPU (was the last costly
+                           # per-clip CPU augmentation: ~0.6 ms/utt)
+  speed_factors: [0.9, 1.1]
   snr_db_min: 0.0
   snr_db_max: 20.0
-  p_noise: 0.0
-  p_rir: 0.5
+  p_noise: 0.6
+  p_rir: 0.5               # fraction of each batch to reverb (on GPU)
   p_speed: 0.5
   p_gain: 0.5
   specaug_enabled: true
@@ -36,17 +40,15 @@ aug:
   specaug_n_freq: 2
   specaug_time_mask: 25
   specaug_n_time: 2
-
 optim:
-  lr: 0.0022               # scaled for global batch 256
+  lr: 0.003                # scaled for global batch 512
   weight_decay: 0.0001
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
   warmup_steps: 1000
-  max_steps: 30000         # ~64 epochs over 120,098 utts at global batch 256
+  max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
   min_lr_ratio: 0.01
-
 seed: 1337
 precision: bf16
 ema_decay: 0.999
