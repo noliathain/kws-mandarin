@@ -33,6 +33,9 @@ class AugConfig:
     gpu_rir: bool = False          # apply RIR reverb on the GPU (batched) in the training step
                                    # instead of per-clip in dataloader workers (avoids worker IPC)
     gpu_noise: bool = False        # apply MUSAN additive noise on the GPU (batched), same reason
+    gpu_speed: bool = False        # speed-perturb on the GPU: one batched resample per factor
+                                   # instead of a per-clip resample in the loader
+    speed_factors: list[float] = field(default_factory=lambda: [0.9, 1.1])
     snr_db_min: float = 0.0
     snr_db_max: float = 20.0
     p_noise: float = 0.6

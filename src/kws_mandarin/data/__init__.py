@@ -5,6 +5,7 @@ from .augment import (
     add_noise_batch,
     apply_rir,
     apply_rir_batch,
+    speed_perturb_batch,
 )
 from .dataset import KWSDataset, collate_kws
 from .manifest import Utterance, manifest_stats, read_manifest, write_manifest
@@ -28,6 +29,7 @@ __all__ = [
     "load_rir_pack",
     "manifest_stats",
     "pack_noise",
+    "speed_perturb_batch",
     "pack_rirs",
     "read_manifest",
     "select_shards",

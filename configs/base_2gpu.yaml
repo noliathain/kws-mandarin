@@ -8,7 +8,8 @@ data:
   batch_size: 256          # per GPU -> global 512
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
-  loader_threads: 0        # soundfile FLAC decode holds the GIL here, so threads don't help
+  loader_threads: 8        # PCM shards decode without holding the GIL (unlike FLAC), so the
+                           # in-process loader does scale across threads: 2.0 -> 1.2 ms/utt
   prefetch_factor: 2
   bucket_size: 2048        # length-bucket 8 batches' worth, then emit batches in shuffled order
                            # -> batches are length-homogeneous, so almost no padded compute
@@ -20,6 +21,9 @@ aug:
   rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
   gpu_rir: true            # RIR reverb applied on-GPU (batched) in the training step
   gpu_noise: true          # MUSAN noise/music/babble mixed on-GPU at sampled SNR, after reverb
+  gpu_speed: true          # 3-way speed perturbation batched on-GPU (was the last costly
+                           # per-clip CPU augmentation: ~0.6 ms/utt)
+  speed_factors: [0.9, 1.1]
   snr_db_min: 0.0
   snr_db_max: 20.0
   p_noise: 0.6

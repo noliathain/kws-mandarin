@@ -88,3 +88,73 @@ def test_loss_decreases_on_overfit(tmp_path):
     trainer.train(resume=False)
     last = trainer._loss_from_batch(batch).item()
     assert last < first, f"loss did not decrease: {first:.3f} -> {last:.3f}"
+
+
+def test_gpu_augment_keeps_lengths_consistent_with_audio(tmp_path):
+    # _gpu_augment scatters differently-resampled sub-batches back into one padded tensor.
+    # If the returned lengths don't track each clip's own factor, CTC's input_lengths stop
+    # matching the audio -- so assert every reported length holds real (non-zero) samples.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.aug = AugConfig(enabled=True, specaug_enabled=False, gpu_speed=True, p_speed=1.0,
+                        speed_factors=[0.9, 1.1], p_noise=0.0, p_rir=0.0, p_gain=0.0)
+    trainer = Trainer(cfg)
+    trainer.raw_model.train()
+
+    torch.manual_seed(0)
+    wavs = torch.zeros(6, 16000)
+    lengths = torch.tensor([16000, 12000, 8000, 16000, 12000, 8000])
+    for i, n in enumerate(lengths.tolist()):
+        wavs[i, :n] = torch.randn(n) * 0.1
+
+    out, out_len = trainer._gpu_augment(wavs, lengths)
+    assert out.shape[0] == 6 and out_len.shape == (6,)
+    assert int(out_len.max()) <= out.shape[-1]              # never point past the buffer
+    for i in range(6):
+        # each clip was stretched by one of the factors, in proportion to its own length
+        ratio = out_len[i].item() / lengths[i].item()
+        assert any(abs(ratio - r) < 0.02 for r in (1.0, 10 / 9, 10 / 11))
+        assert out[i, : out_len[i]].abs().max() > 0         # audio really is that long
+        assert out[i, out_len[i] + 40:].abs().max() < 1e-3  # and padding stayed padding
+
+
+def test_gpu_augment_is_dtype_safe_under_autocast(tmp_path):
+    # Resample/FFT-convolve are autocast-eligible, so under bf16 they return bf16 while the
+    # scatter buffer is fp32 -- which crashed the first bf16 run. Augmentation must stay fp32.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.aug = AugConfig(enabled=True, specaug_enabled=False, gpu_speed=True, p_speed=1.0,
+                        speed_factors=[0.9, 1.1], p_noise=0.0, p_rir=0.0, p_gain=0.0)
+    trainer = Trainer(cfg)
+    trainer.raw_model.train()
+
+    dev = trainer.device                          # cuda when present, exactly as in training
+    wavs = (torch.randn(4, 16000) * 0.1).to(dev)
+    lengths = torch.tensor([16000, 12000, 16000, 8000])
+    with torch.autocast(device_type=dev.type, dtype=torch.bfloat16):
+        out, out_len = trainer._gpu_augment(wavs, lengths)
+    assert out.dtype == torch.float32
+    assert out.shape[0] == 4 and int(out_len.max()) <= out.shape[-1]
+
+
+def test_ema_warmup_tracks_the_model_early(tmp_path):
+    # Validation and best-checkpoint selection score the EMA weights. With a constant 0.999
+    # decay the EMA is still ~14% random init at step 2000, so it reported an all-blank model
+    # while the trained weights were emitting correctly. The decay must ramp in.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.ema_decay = 0.999
+    trainer = Trainer(cfg)
+
+    with torch.no_grad():
+        for p in trainer.raw_model.parameters():
+            p.fill_(1.0)
+        for p in trainer.ema.parameters():
+            p.fill_(0.0)
+    for i in range(20):
+        trainer.step = i
+        trainer._update_ema()
+
+    got = torch.stack([p.mean() for p in trainer.ema.parameters()]).mean().item()
+    # a constant 0.999 decay would have moved only 1 - 0.999^20 = 2% of the way
+    assert got > 0.75, f"EMA still {got:.3f} of the way to the model after 20 steps"

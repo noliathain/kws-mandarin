@@ -36,6 +36,7 @@ from ..data import (
     add_noise_batch,
     apply_rir_batch,
     collate_kws,
+    speed_perturb_batch,
 )
 from ..data.manifest import read_manifest
 from ..loss import CTCLoss
@@ -140,7 +141,7 @@ class Trainer:
             snr_db_range=(a.snr_db_min, a.snr_db_max),
             p_noise=(0.0 if a.gpu_noise else a.p_noise),
             p_rir=(0.0 if a.gpu_rir else a.p_rir),
-            p_speed=a.p_speed, p_gain=a.p_gain,
+            p_speed=(0.0 if a.gpu_speed else a.p_speed), p_gain=a.p_gain,
             seed=self.cfg.seed + self.rank,
         )
 
@@ -245,16 +246,48 @@ class Trainer:
 
     # -- training ------------------------------------------------------------------------
 
-    def _gpu_augment(self, wavs: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+    def _gpu_augment(self, wavs: torch.Tensor, lengths: torch.Tensor):
+        """Run the augmentation chain outside autocast, in fp32.
+
+        Resampling and FFT convolution are autocast-eligible, so under bf16 they would return
+        bf16 (breaking the fp32 scatter buffer) and compute SNR scaling at ~3 decimal digits.
+        Augmentation is signal processing on the input, not part of the model's math.
+        """
+        with torch.autocast(device_type=self.device.type, enabled=False):
+            return self._augment_waveforms(wavs.float(), lengths)
+
+    def _augment_waveforms(self, wavs: torch.Tensor, lengths: torch.Tensor):
         """Batched GPU augmentation, in physically-correct order for far-field robustness:
-        reverberate the clean signal in a room (RIR), THEN add that room's ambient noise at a
-        sampled SNR. Each stage hits an independent random fraction of the batch.
+        change the talker's speaking rate (speed), reverberate that in a room (RIR), THEN add
+        the room's ambient noise at a sampled SNR. Each stage hits an independent random
+        fraction of the batch. Returns (wavs, lengths) — speed perturbation changes duration.
         """
         if not self.raw_model.training:
-            return wavs
+            return wavs, lengths
         a = self.cfg.aug
         b, t = wavs.shape
         dev = wavs.device
+        lengths = lengths.to(dev)
+
+        if a.gpu_speed and a.speed_factors and a.p_speed > 0:
+            # Kaldi-style discrete speed perturbation: one batched resample per factor, rather
+            # than a per-clip resample in the loader (which cost ~0.6 ms/utt single-threaded).
+            factors = [1.0] + list(a.speed_factors)
+            pick = torch.randint(0, len(factors), (b,), device=dev)
+            pick = torch.where(torch.rand(b, device=dev) < a.p_speed, pick,
+                               torch.zeros_like(pick))          # (1-p_speed) stay at 1.0x
+            parts = []
+            for fi, f in enumerate(factors):
+                sel = (pick == fi).nonzero().flatten()
+                if sel.numel():
+                    parts.append((sel, *speed_perturb_batch(wavs[sel], lengths[sel], f)))
+            tmax = max(p[1].shape[-1] for p in parts)
+            out = wavs.new_zeros(b, tmax)
+            new_lengths = torch.empty_like(lengths)
+            for sel, w, ln in parts:
+                out[sel, : w.shape[-1]] = w
+                new_lengths[sel] = ln
+            wavs, lengths, t = out, new_lengths, tmax
 
         if self.gpu_rirs is not None and a.p_rir > 0:
             hit = torch.rand(b, device=dev) < a.p_rir
@@ -274,21 +307,24 @@ class Trainer:
                 snr = torch.empty(b, device=dev).uniform_(a.snr_db_min, a.snr_db_max)
                 noisy = add_noise_batch(wavs, noise, snr, lengths)
                 wavs = torch.where(hit.unsqueeze(1), noisy, wavs)
-        return wavs
+        return wavs, lengths
 
     def _loss_from_batch(self, batch) -> torch.Tensor:
         wavs = batch["wavs"].to(self.device, non_blocking=True)
-        wav_lengths = batch["wav_lengths"]
-        wavs = self._gpu_augment(wavs, wav_lengths)
+        # augmentation may change duration (speed), so lengths come back from it
+        wavs, wav_lengths = self._gpu_augment(wavs, batch["wav_lengths"])
         targets = batch["targets"].to(self.device, non_blocking=True)
-        input_lengths = self.raw_model.output_lengths(wav_lengths)  # CPU
+        input_lengths = self.raw_model.output_lengths(wav_lengths.cpu())  # CTC wants CPU
         logits = self.model(wavs, wav_lengths)
         return self.criterion(logits, targets, input_lengths, batch["target_lengths"])
 
     def _update_ema(self) -> None:
         if self.ema is None:
             return
-        d = self.cfg.ema_decay
+        # Ramp the decay in. A constant 0.999 still carries 0.999^2000 ~ 14% of the RANDOM INIT
+        # at step 2000, and averages over the pre-alignment trajectory -- so early validation
+        # scored a degenerate all-blank model that training had long since moved past.
+        d = min(self.cfg.ema_decay, (1.0 + self.step) / (10.0 + self.step))
         with torch.no_grad():
             for e, m in zip(self.ema.parameters(), self.raw_model.parameters()):
                 e.mul_(d).add_(m, alpha=1 - d)

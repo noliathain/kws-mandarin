@@ -150,3 +150,34 @@ def test_add_noise_batch_measures_snr_over_valid_frames_only():
     added = (out - padded)[0, :16000]
     meas = 10 * torch.log10(wav.pow(2).mean() / added.pow(2).mean())
     assert abs(meas.item() - 10.0) < 0.3   # loose: noise power is estimated over the full row
+
+
+def test_speed_perturb_batch_scales_duration_and_lengths_together():
+    # Speed perturbation changes duration, so the valid lengths must follow -- if they don't,
+    # CTC gets input_lengths that no longer match the audio and the alignment is garbage.
+    from kws_mandarin.data.augment import speed_perturb_batch
+
+    wavs = torch.zeros(3, 16000)
+    for i, n in enumerate([16000, 8000, 12000]):
+        wavs[i, :n] = torch.randn(n) * 0.1
+    lengths = torch.tensor([16000, 8000, 12000])
+
+    slow, slow_len = speed_perturb_batch(wavs, lengths, 0.9)     # slower -> longer
+    fast, fast_len = speed_perturb_batch(wavs, lengths, 1.1)     # faster -> shorter
+    assert slow.shape[-1] > 16000 and fast.shape[-1] < 16000
+    assert torch.allclose(slow_len, (lengths * 10 / 9).round().long(), atol=1)
+    assert torch.allclose(fast_len, (lengths * 10 / 11).round().long(), atol=1)
+    assert torch.isfinite(slow).all() and torch.isfinite(fast).all()
+
+    # padding must stay padding: resampled zeros are zeros, so nothing leaks past the length
+    assert slow[1, slow_len[1] + 40:].abs().max() < 1e-4
+
+
+def test_speed_perturb_batch_matches_per_clip_version():
+    # The batched GPU path replaced the per-clip loader path; they must be the same augmentation.
+    from kws_mandarin.data.augment import speed_perturb, speed_perturb_batch
+
+    wav = torch.randn(16000) * 0.1
+    single = speed_perturb(wav, 1.1)
+    batched, _ = speed_perturb_batch(wav.unsqueeze(0), torch.tensor([16000]), 1.1)
+    assert torch.allclose(single, batched[0], atol=1e-5)

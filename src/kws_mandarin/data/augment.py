@@ -131,6 +131,21 @@ def speed_perturb(wav: Tensor, factor: float, sample_rate: int = 16000) -> Tenso
     return torchaudio.functional.resample(wav, frac.numerator, frac.denominator)
 
 
+def speed_perturb_batch(wavs: Tensor, lengths: Tensor, factor: float) -> tuple[Tensor, Tensor]:
+    """Speed-perturb a whole padded batch by one shared factor, on-device.
+
+    Resampling per clip on the CPU was the last expensive augmentation left in the loader.
+    One factor for the whole (B, T) block means a single batched resample, and the valid
+    lengths scale by the same ratio (padding zeros resample to zeros, so they stay padding).
+    """
+    if factor == 1.0:
+        return wavs, lengths
+    frac = Fraction(factor).limit_denominator(20)
+    out = torchaudio.functional.resample(wavs, frac.numerator, frac.denominator)
+    new_len = (lengths.to(torch.float64) * frac.denominator / frac.numerator)
+    return out, new_len.round().to(lengths.dtype).clamp(max=out.shape[-1])
+
+
 def gain_perturb(wav: Tensor, gain_db: float) -> Tensor:
     return wav * (10.0 ** (gain_db / 20.0))
 
