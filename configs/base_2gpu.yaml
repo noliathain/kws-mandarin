@@ -8,8 +8,7 @@ data:
   batch_size: 256          # per GPU -> global 512
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
-  loader_threads: 8        # PCM shards decode without holding the GIL (unlike FLAC), so the
-                           # in-process loader does scale across threads: 2.0 -> 1.2 ms/utt
+  loader_threads: 0        # MEASURED HARMFUL: the thread pool costs 3x (47 -> 146 ms/step).
   read_streams: 8          # shards read concurrently PER RANK (16 total across 2 GPUs). The
                            # mount does 34 MB/s on one stream, 285 MB/s at 16; a step eats
                            # ~41 MB, so sequential reads cost 1.15 s/step = 90% of the step.

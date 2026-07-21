@@ -120,6 +120,9 @@ class PinyinTokenizer:
         # Special tokens first; blank MUST be id 0 for torch's CTCLoss default.
         self.id_to_unit: list[str] = [self.BLANK, self.UNK, *units]
         self.unit_to_id: dict[str, int] = {u: i for i, u in enumerate(self.id_to_unit)}
+        # Han -> ids is a pure function, but pypinyin phrase-context lookup costs ~0.13 ms and
+        # training sweeps the same ~120k transcripts once per epoch (~64 times a run). Cache it.
+        self._encode_cache: dict[str, tuple[int, ...]] = {}
 
     # -- construction ------------------------------------------------------------------
 
@@ -142,8 +145,14 @@ class PinyinTokenizer:
         return out
 
     def encode(self, text: str) -> list[int]:
-        unk = self.unit_to_id[self.UNK]
-        return [self.unit_to_id.get(u, unk) for u in self.units_for_text(text)]
+        cached = self._encode_cache.get(text)
+        if cached is None:
+            unk = self.unit_to_id[self.UNK]
+            cached = tuple(self.unit_to_id.get(u, unk) for u in self.units_for_text(text))
+            self._encode_cache[text] = cached
+        # Return a fresh list: callers own the result, and handing out the cached object would
+        # let one caller's mutation corrupt every later encode of the same text.
+        return list(cached)
 
     def decode_units(self, ids: list[int]) -> list[str]:
         return [self.id_to_unit[i] for i in ids]

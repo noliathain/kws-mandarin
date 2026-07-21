@@ -68,3 +68,27 @@ def test_vocab_sizes_are_sane():
     sizes = {m: PinyinTokenizer(m).vocab_size for m in ToneMode}
     # separate (initials+finals+tones) << final (initials + toned-finals) << syllable
     assert sizes[ToneMode.SEPARATE] < sizes[ToneMode.FINAL] < sizes[ToneMode.SYLLABLE]
+
+
+def test_encode_is_cached_across_repeated_texts():
+    # Training sweeps the same ~120k transcripts once per epoch (~64x a run), and each pypinyin
+    # phrase-context lookup costs ~0.13 ms. The conversion is pure, so it must be done once.
+    tok = PinyinTokenizer()
+    calls = []
+    real = tok.units_for_text
+    tok.units_for_text = lambda t: (calls.append(t), real(t))[1]
+
+    first = tok.encode("你好世界")
+    second = tok.encode("你好世界")
+    assert first == second
+    assert len(calls) == 1, "second encode recomputed the pinyin conversion"
+
+
+def test_encode_result_is_not_aliased_to_the_cache():
+    # Callers own the returned list. Handing back the cached object would let one caller's
+    # mutation silently corrupt every later encode of the same text.
+    tok = PinyinTokenizer()
+    first = tok.encode("打开空调")
+    first.append(999)
+    assert tok.encode("打开空调") != first
+    assert 999 not in tok.encode("打开空调")
