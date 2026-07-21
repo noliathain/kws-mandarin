@@ -88,14 +88,11 @@ def apply_rir_batch(wavs: Tensor, rirs: Tensor) -> Tensor:
     aren't needed for the costly reverb augmentation.
     """
     b, t = wavs.shape
-    length = rirs.shape[1]
     energy = rirs.pow(2).sum(dim=1, keepdim=True).sqrt().clamp_min(1e-8)
     rirs = rirs / energy
-    out = torch.nn.functional.conv1d(
-        wavs.unsqueeze(0),                # (1, B, T)
-        rirs.flip(1).unsqueeze(1),        # (B, 1, L) flipped -> convolution
-        padding=length - 1, groups=b,
-    ).squeeze(0)                          # (B, T + L - 1)
+    # FFT convolution (O(N log N)) — a direct conv1d with a multi-second (~32k-sample) kernel is
+    # orders of magnitude slower and was dominating the GPU step time.
+    out = torchaudio.functional.fftconvolve(wavs, rirs)                 # (B, T + L - 1)
     peaks = rirs.abs().argmax(dim=1)                                    # (B,)
     idx = peaks.unsqueeze(1) + torch.arange(t, device=wavs.device)      # (B, T)
     return out.gather(1, idx)

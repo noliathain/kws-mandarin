@@ -8,7 +8,7 @@ data:
   batch_size: 256          # per GPU -> global 512
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
-  loader_threads: 16       # parallelize decode+augment across threads (per rank) -> uses the cores
+  loader_threads: 0        # soundfile FLAC decode holds the GIL here, so threads don't help
   prefetch_factor: 2
 aug:
   enabled: true
