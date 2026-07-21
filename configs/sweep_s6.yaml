@@ -1,12 +1,13 @@
-# Capacity sweep point: scale 12.0 (~642k params). Identical to
-# base_2gpu.yaml except model.scale and ckpt_dir, so the comparison is clean.
-model: {scale: 12.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
+# Capacity sweep: scale 6.0 (~190k params). Global batch 512 for EVERY point
+# (128 x accum 2 x 2 GPUs), so BatchNorm sees the same micro-batch size at
+# every scale and the comparison is controlled. Only model.scale differs.
+model: {scale: 6.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
 data:
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 256          # per GPU -> global 512
+  batch_size: 128          # micro-batch; x accum 2 x 2 GPUs -> global 512
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
   loader_threads: 0        # MEASURED HARMFUL: the thread pool costs 3x (47 -> 146 ms/step).
@@ -46,6 +47,7 @@ optim:
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
+  accum_steps: 2
   warmup_steps: 1000
   max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
   min_lr_ratio: 0.01
@@ -54,7 +56,7 @@ precision: bf16
 ema_decay: 0.999
 log_every: 20
 val_every: 2000
-ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/scale12
+ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/sweep_s6
 keep_last: 3
 val_max_utts: 500
 val_use_ntc: false

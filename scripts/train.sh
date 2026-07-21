@@ -43,6 +43,10 @@ fi
 echo ">> logging to $LOG"
 echo ">> training start $(date -u +%FT%TZ) nproc=$NPROC config=$CONFIG ${RESUME_ARG:-(resume)}" \
     | tee -a "$LOG"
+# Varying utterance length makes every batch a different shape, which fragments the caching
+# allocator until a large allocation fails a few hundred steps in (seen as OOM, or as cuFFT
+# CUFFT_INTERNAL_ERROR when it is cuFFT that cannot get workspace).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 uv run --extra train torchrun --standalone --nproc_per_node="$NPROC" \
   -m kws_mandarin.train --config "$CONFIG" $RESUME_ARG 2>&1 | tee -a "$LOG"
 echo ">> training exit $? $(date -u +%FT%TZ)" | tee -a "$LOG"
