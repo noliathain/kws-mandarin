@@ -76,6 +76,9 @@ class DataConfig:
     prefetch_factor: int = 4       # batches each worker prefetches (keeps the GPU fed)
     loader_threads: int = 0        # >0: parallelize shard decode+augment across threads
                                    # (with num_workers=0 this uses all cores, no worker IPC)
+    read_streams: int = 0          # >1: read this many shards concurrently. The storage mount
+                                   # is ~34 MB/s single-stream but ~285 MB/s at 16 streams, and
+                                   # sequential shard reads were 90% of the training step.
     bucket_size: int = 0           # >0: length-bucket this many samples before batching, so
                                    # batches are length-homogeneous (much less padding waste)
     max_duration_s: float = 16.0  # drop utterances longer than this

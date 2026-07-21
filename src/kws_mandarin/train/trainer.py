@@ -194,6 +194,7 @@ class Trainer:
                 num_threads=d.loader_threads,
                 bucket_size=d.bucket_size,
                 batch_size=d.batch_size,
+                read_streams=d.read_streams,
             )
         return KWSDataset(d.train_manifest, self.tokenizer, sample_rate=d.sample_rate, augment=augment)
 

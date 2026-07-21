@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import random
 import tarfile
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -222,6 +224,58 @@ def _threaded_map(fn, iterable, num_threads: int):
                 yield res
 
 
+def _interleave_shards(paths: list[str], num_streams: int):
+    """Read ``num_streams`` shards concurrently, yielding their raw items interleaved.
+
+    Reading shards one at a time makes training I/O-bound: the storage mount delivers only
+    ~34 MB/s on a single stream but ~285 MB/s across 16, and a training step consumes ~41 MB
+    of audio. Sequential reads therefore cost ~1.2 s/step — 90% of the step time — while the
+    GPU sits idle. Each reader thread owns a disjoint slice of the shard list; tar reads
+    release the GIL, so these genuinely overlap.
+    """
+    q: queue.Queue = queue.Queue(maxsize=num_streams * 64)
+    stop = threading.Event()
+    done = object()
+
+    def reader(mine: list[str]) -> None:
+        try:
+            for p in mine:
+                for item in _iter_shard_raw(p):
+                    while not stop.is_set():
+                        try:
+                            q.put(item, timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+                    if stop.is_set():
+                        return
+        finally:
+            q.put(done)
+
+    slices = [paths[i::num_streams] for i in range(num_streams)]
+    slices = [s for s in slices if s]
+    threads = [threading.Thread(target=reader, args=(s,), daemon=True) for s in slices]
+    for t in threads:
+        t.start()
+    try:
+        finished = 0
+        while finished < len(threads):
+            item = q.get()
+            if item is done:
+                finished += 1
+                continue
+            yield item
+    finally:
+        # A consumer that stops early (bucketing, max_steps) must not leave readers blocked
+        # on a full queue forever.
+        stop.set()
+        while any(t.is_alive() for t in threads):
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+
+
 class ShardDataset(IterableDataset):
     def __init__(
         self,
@@ -237,6 +291,7 @@ class ShardDataset(IterableDataset):
         num_threads: int = 0,
         bucket_size: int = 0,
         batch_size: int = 0,
+        read_streams: int = 0,
     ):
         super().__init__()
         self.shards = list(shards)
@@ -254,6 +309,9 @@ class ShardDataset(IterableDataset):
         # groups, so batches are length-homogeneous and barely padded.
         self.bucket_size = bucket_size
         self.batch_size = batch_size
+        # >1: read this many shards concurrently. The mount is ~34 MB/s single-stream but
+        # ~285 MB/s at 16 streams, and sequential reads were 90% of the training step.
+        self.read_streams = read_streams
         # infinite: cycle shards forever (reshuffling each pass). Under DDP this avoids the
         # epoch-boundary hang where unevenly-split shards give ranks different step counts and
         # desync the gradient all-reduce. Training is bounded by max_steps instead of epochs.
@@ -289,11 +347,11 @@ class ShardDataset(IterableDataset):
         return {"wav": wav, "target": torch.tensor(target, dtype=torch.long), "utt_id": key}
 
     def _samples(self, pass_idx: int = 0):
-        raw_stream = (
-            raw
-            for shard in self._my_shards(pass_idx)
-            for raw in _iter_shard_raw(shard)
-        )
+        my_shards = self._my_shards(pass_idx)
+        if self.read_streams and self.read_streams > 1:
+            raw_stream = _interleave_shards(my_shards, min(self.read_streams, len(my_shards)))
+        else:
+            raw_stream = (raw for shard in my_shards for raw in _iter_shard_raw(shard))
         if self.num_threads and self.num_threads > 1:
             yield from _threaded_map(self._process, raw_stream, self.num_threads)
         else:

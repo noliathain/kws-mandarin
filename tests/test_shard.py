@@ -1,3 +1,4 @@
+import time
 import soundfile as sf
 import torch
 from torch.utils.data import DataLoader
@@ -163,3 +164,61 @@ def test_bucketing_makes_batches_length_homogeneous(tmp_path):
                                    bucket_size=64, batch_size=8))
     assert bucketed < plain / 3                  # padding waste collapses
     assert bucketed < 0.10
+
+
+def test_parallel_shard_reads_overlap_and_lose_nothing(tmp_path):
+    # The storage mount gives ~34 MB/s on one stream but ~285 MB/s across 16, so reading
+    # shards sequentially made I/O 90% of the training step. Readers must genuinely overlap,
+    # and interleaving must not drop or duplicate a single sample.
+    import time
+
+    from kws_mandarin.data.shard import _interleave_shards, _iter_shard_raw
+
+    utts = _corpus(tmp_path, 24)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=8, workers=1)
+
+    ids = sorted(item[0] for item in _interleave_shards(shards, 4))
+    assert ids == sorted(u.utt_id for u in utts)      # complete, no duplicates
+
+    # overlap: simulate a slow mount by timing a delayed read serially vs interleaved
+    delay = 0.05
+    def slow(path):
+        time.sleep(delay)
+        yield from _iter_shard_raw(path)
+
+    t0 = time.perf_counter()
+    for p in shards:
+        list(slow(p))
+    serial = time.perf_counter() - t0
+
+    import kws_mandarin.data.shard as sh
+    real, sh._iter_shard_raw = sh._iter_shard_raw, slow
+    try:
+        t0 = time.perf_counter()
+        list(_interleave_shards(shards, 8))
+        parallel = time.perf_counter() - t0
+    finally:
+        sh._iter_shard_raw = real
+
+    assert parallel < serial / 2, f"reads did not overlap: {parallel:.3f}s vs {serial:.3f}s"
+
+
+def test_interleave_shards_stops_readers_when_consumer_quits(tmp_path):
+    # Training stops mid-stream (max_steps, bucketing). Reader threads must not stay blocked
+    # on a full queue -- leaked threads would pin memory and file handles for the whole run.
+    import threading
+
+    from kws_mandarin.data.shard import _interleave_shards
+
+    utts = _corpus(tmp_path, 40)
+    shards = write_shards(utts, str(tmp_path / "shards"), num_shards=4, workers=1)
+
+    before = threading.active_count()
+    gen = _interleave_shards(shards, 4)
+    next(gen)                                          # start readers, then abandon them
+    gen.close()
+    for _ in range(100):
+        if threading.active_count() <= before:
+            break
+        time.sleep(0.05)
+    assert threading.active_count() <= before, "reader threads leaked after consumer stopped"
