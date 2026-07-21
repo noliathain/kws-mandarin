@@ -1,0 +1,61 @@
+# Capacity sweep point: scale 12.0 (~642k params). Identical to
+# base_2gpu.yaml except model.scale and ckpt_dir, so the comparison is clean.
+model: {scale: 12.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
+data:
+  dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
+  train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
+  shuffle_buffer: 256
+  sample_rate: 16000
+  batch_size: 256          # per GPU -> global 512
+  num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
+                           # transfer races randomly ("could not unlink shared memory"); 0 avoids it
+  loader_threads: 0        # MEASURED HARMFUL: the thread pool costs 3x (47 -> 146 ms/step).
+  read_streams: 8          # shards read concurrently PER RANK (16 total across 2 GPUs). The
+                           # mount does 34 MB/s on one stream, 285 MB/s at 16; a step eats
+                           # ~41 MB, so sequential reads cost 1.15 s/step = 90% of the step.
+                           # Measured: 1151 -> 141 ms/step. 4 ties this, 16 is slightly worse.
+  prefetch_factor: 4       # batches held ready by the background prefetch thread
+  cache_in_ram: true       # ~8.5 GB/rank; after pass 1 there is no mount read or tar parse
+  bucket_size: 2048        # length-bucket 8 batches' worth, then emit batches in shuffled order
+                           # -> batches are length-homogeneous, so almost no padded compute
+aug:
+  enabled: true
+  musan_dir: null
+  rir_dir: null
+  noise_pack: /teamspace/lightning_storage/kws-mandarin/musan.pt
+  rir_pack: /teamspace/lightning_storage/kws-mandarin/rirs.pt
+  gpu_rir: true            # RIR reverb applied on-GPU (batched) in the training step
+  gpu_noise: true          # MUSAN noise/music/babble mixed on-GPU at sampled SNR, after reverb
+  gpu_speed: true          # 3-way speed perturbation batched on-GPU (was the last costly
+                           # per-clip CPU augmentation: ~0.6 ms/utt)
+  speed_factors: [0.9, 1.1]
+  snr_db_min: 0.0
+  snr_db_max: 20.0
+  p_noise: 0.6
+  p_rir: 0.5               # fraction of each batch to reverb (on GPU)
+  p_speed: 0.5
+  p_gain: 0.5
+  specaug_enabled: true
+  specaug_freq_mask: 8
+  specaug_n_freq: 2
+  specaug_time_mask: 25
+  specaug_n_time: 2
+optim:
+  lr: 0.003                # scaled for global batch 512
+  weight_decay: 0.0001
+  beta1: 0.9
+  beta2: 0.98
+  grad_clip: 5.0
+  warmup_steps: 1000
+  max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
+  min_lr_ratio: 0.01
+seed: 1337
+precision: bf16
+ema_decay: 0.999
+log_every: 20
+val_every: 2000
+ckpt_dir: /teamspace/lightning_storage/kws-mandarin/checkpoints/scale12
+keep_last: 3
+val_max_utts: 500
+val_use_ntc: false
+val_keywords: [中国, 经济, 发展, 公司, 市场, 政府, 记者, 工作, 问题, 社会]

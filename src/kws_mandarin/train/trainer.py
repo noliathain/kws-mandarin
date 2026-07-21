@@ -469,10 +469,10 @@ class Trainer:
             epoch += 1
         if self._stop_requested and self.is_main:
             print(f"stopping at step {self.step} on signal; checkpointing", flush=True)
-            self.validate_and_checkpoint()
-            self.model.train()
-        if self.is_main:
-            self.validate_and_checkpoint()
+        # EVERY rank must call this: it ends in a collective barrier, and rank 0 doing one more
+        # barrier than the others deadlocks the job at the finish line (rank 0 waits out the
+        # 30-minute process-group timeout while the run looks "done" in the log).
+        self.validate_and_checkpoint()
         if self.distributed:
             dist.barrier()
 

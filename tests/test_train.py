@@ -248,3 +248,22 @@ def test_checkpoint_round_trips_the_data_stream_position(tmp_path):
     assert fresh.train_dataset.pass_idx == 0
     fresh.load_checkpoint(tmp_path / "ckpt" / "latest.pt")
     assert fresh.train_dataset.pass_idx == 7, "resumed run would replay data already trained on"
+
+
+def test_final_validation_runs_on_every_rank(tmp_path):
+    # validate_and_checkpoint ends in a collective barrier. Guarding the FINAL call with
+    # is_main made rank 0 execute one more barrier than the others, so the job deadlocked
+    # after the last step -- the log showed a finished run while the process hung for the
+    # 30-minute process-group timeout. Non-main ranks must reach it too.
+    train_m, dev_m = _corpus(tmp_path)
+    cfg = _tiny_config(tmp_path, train_m, dev_m)
+    cfg.optim.max_steps = 2
+    cfg.val_every = 10_000                       # only the end-of-training call fires
+    trainer = Trainer(cfg)
+
+    calls = []
+    trainer.validate_and_checkpoint = lambda: (calls.append(trainer.step), {})[1]
+    trainer.is_main = False                      # pretend to be a non-main rank
+    trainer.train(resume=False)
+
+    assert calls, "non-main rank skipped the final validate_and_checkpoint -> barrier mismatch"
