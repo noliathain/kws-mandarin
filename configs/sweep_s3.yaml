@@ -1,13 +1,13 @@
 # Capacity sweep: scale 3.0 (~62k params). Global batch 512 for EVERY point
-# (128 x accum 2 x 2 GPUs), so BatchNorm sees the same micro-batch size at
-# every scale and the comparison is controlled. Only model.scale differs.
+# (128 x accum 2 x 2 GPUs), so BatchNorm sees 64-sample statistics at every
+# scale in this family (3/6/12/20/30), matching the completed scale-20 run.
 model: {scale: 3.0, n_mels: 40, causal: true, ssn_bands: 5, dropout: 0.1, tone_mode: final}
 data:
   dev_manifest: /teamspace/lightning_storage/kws-mandarin/manifests/aishell1_dev.jsonl
   train_shards: /teamspace/lightning_storage/kws-mandarin/shards/train_pcm/*.tar
   shuffle_buffer: 256
   sample_rate: 16000
-  batch_size: 128          # micro-batch; x accum 2 x 2 GPUs -> global 512
+  batch_size: 64           # micro-batch; x accum 4 x 2 GPUs -> global 512
   num_workers: 0           # in-process loading: this container's DataLoader worker->main shm
                            # transfer races randomly ("could not unlink shared memory"); 0 avoids it
   loader_threads: 0        # MEASURED HARMFUL: the thread pool costs 3x (47 -> 146 ms/step).
@@ -47,7 +47,7 @@ optim:
   beta1: 0.9
   beta2: 0.98
   grad_clip: 5.0
-  accum_steps: 2
+  accum_steps: 4
   warmup_steps: 1000
   max_steps: 15000         # ~64 epochs over 120,098 utts at global batch 512
   min_lr_ratio: 0.01
