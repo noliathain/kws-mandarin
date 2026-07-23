@@ -101,7 +101,15 @@
   <p class="note"><b>Reading this:</b> TER is the reliable signal — measured over the full dev set, it falls monotonically with size and saturates at scale 30. FRR is measured on 500 utterances × 10 keywords, so single-scale wobbles (e.g. scale 30's 0.25) are within noise; the trend, not the point, is what to trust.</p>
 </div>
 
-<h2>4 · How the pipeline got fast enough to run this</h2>
+<h2>4 · Noise robustness (scale 20)</h2>
+<p class="lede">The sweet-spot model degrades gracefully as noise rises — no cliff. False-reject rate at 1 alarm/hour roughly triples from clean to 0&nbsp;dB, but the system keeps working through café-level noise (~5&nbsp;dB). This is the payoff of training with additive noise, finally measured.</p>
+<div class="panel">
+  <svg id="snr" viewBox="0 0 860 360" role="img" aria-label="Token error rate and false-reject rate versus signal-to-noise ratio"></svg>
+  <div class="legend" id="snrleg"></div>
+  <p class="note"><b>Caveat:</b> the noise here is MUSAN — the same corpus the model trained on — so this is robustness to the training <i>distribution</i>, a floor rather than held-out generalization. A truly unseen source (WHAM!/DEMAND) is the honest follow-up; the eval script already accepts one.</p>
+</div>
+
+<h2>5 · How the pipeline got fast enough to run this</h2>
 <p class="lede">The sweep was only affordable because the training step went from data-bound to compute-bound first. Six full runs at the original 1.4 it/s would have taken ~18 h of wall clock; at 7.5 it/s (scale 3) the whole sweep fit in an afternoon across a few boxes.</p>
 <div class="panel">
   <div class="flow">
@@ -219,7 +227,38 @@ function table(){
   });
 }
 
-function draw(){capChart();trajChart();table();}
+const SNR=[{snr:'clean',x:25,ter:0.2879,frr:0.2167},{snr:20,x:20,ter:0.3281,frr:0.3167},
+  {snr:15,x:15,ter:0.3568,frr:0.3333},{snr:10,x:10,ter:0.3925,frr:0.4333},
+  {snr:5,x:5,ter:0.4575,frr:0.5333},{snr:0,x:0,ter:0.5619,frr:0.6}];
+function snrChart(){
+  const svg=document.getElementById('snr'); svg.innerHTML='';
+  const W=860,H=360,mL=54,mR=54,mT=16,mB=48;
+  const x0=mL,x1=W-mR,y0=H-mB,y1=mT;
+  const X=v=>x1-(v)/25*(x1-x0);            // clean(25) at left, 0 dB at right
+  const lo=0.15,hi=0.65, Y=v=>y0+(v-lo)/(hi-lo)*(y1-y0);
+  [0.2,0.3,0.4,0.5,0.6].forEach(t=>{
+    svg.appendChild(el('line',{x1:x0,y1:Y(t),x2:x1,y2:Y(t),class:'gl'}));
+    svg.appendChild(el('text',{x:x0-10,y:Y(t)+4,'text-anchor':'end',class:'tk'})).textContent=t.toFixed(2);
+  });
+  SNR.forEach(p=>svg.appendChild(el('text',{x:X(p.x),y:y0+18,'text-anchor':'middle',class:'tk'}))
+    .textContent=p.snr==='clean'?'clean':p.snr+'dB');
+  svg.appendChild(el('line',{x1:x0,y1:y0,x2:x1,y2:y0,class:'ax'}));
+  svg.appendChild(el('text',{x:(x0+x1)/2,y:H-6,'text-anchor':'middle',class:'axl'})).textContent='Signal-to-noise ratio (harder →)';
+  const series=[['FRR @1/hr','--s20','frr'],['TER','--s40','ter']];
+  series.forEach(([name,cvar,key])=>{
+    const c=getComputedStyle(document.documentElement).getPropertyValue(cvar).trim();
+    let d='';SNR.forEach((p,i)=>{d+=(i?'L':'M')+X(p.x)+' '+Y(p[key]);});
+    svg.appendChild(el('path',{d,fill:'none',stroke:c,'stroke-width':2.4,'stroke-linejoin':'round'}));
+    SNR.forEach(p=>svg.appendChild(el('circle',{cx:X(p.x),cy:Y(p[key]),r:4,fill:c,class:'dot'})));
+  });
+  const leg=document.getElementById('snrleg'); leg.innerHTML='';
+  series.forEach(([name,cvar])=>{
+    const c=getComputedStyle(document.documentElement).getPropertyValue(cvar).trim();
+    const s=document.createElement('span');
+    s.innerHTML=`<span class="sw" style="background:${c}"></span>${name}`; leg.appendChild(s);
+  });
+}
+function draw(){capChart();trajChart();table();snrChart();}
 draw();
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
 new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
