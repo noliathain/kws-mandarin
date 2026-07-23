@@ -61,3 +61,45 @@ def test_summary_keys():
     durations = [1800, 1800, 1800, 1800]
     out = summary(scores, labels, durations, target_fahs=(0.5, 1.0))
     assert set(out) == {0.5, 1.0}
+
+
+def test_eer_and_auc_perfect_separation():
+    # Perfectly separable scores: EER = 0, AUC = 1. If these don't hold, the metric is wrong
+    # and every SOTA comparison built on it is wrong too.
+    from kws_mandarin.eval import auc, eer
+    scores = [0.1, 0.2, 0.3, 0.8, 0.9, 1.0]
+    labels = [0, 0, 0, 1, 1, 1]
+    assert eer(scores, labels) == 0.0
+    assert auc(scores, labels) == 1.0
+
+
+def test_auc_random_scores_is_half():
+    # Interleaved/degenerate scores -> AUC 0.5 (chance). Tie handling must not push it off 0.5.
+    from kws_mandarin.eval import auc
+    scores = [0.5, 0.5, 0.5, 0.5]
+    labels = [0, 1, 0, 1]
+    assert abs(auc(scores, labels) - 0.5) < 1e-9
+
+
+def test_eer_matches_known_crossover():
+    # pos={0.4,0.6,0.8}, neg={0.2,0.5,0.7}. At threshold 0.55: FRR=1/3 (0.4 missed),
+    # FAR=1/3 (0.7 accepted). EER = 1/3.
+    from kws_mandarin.eval import eer
+    val = eer([0.4, 0.6, 0.8, 0.2, 0.5, 0.7], [1, 1, 1, 0, 0, 0])
+    assert abs(val - 1 / 3) < 0.02
+
+
+def test_auc_rank_identity_matches_bruteforce():
+    # Rank-sum AUC must equal the brute-force P(score_pos > score_neg) with ties as 0.5.
+    import random
+
+    from kws_mandarin.eval import auc
+    rng = random.Random(0)
+    scores = [rng.random() for _ in range(60)]
+    labels = [rng.randint(0, 1) for _ in range(60)]
+    if all(labels) or not any(labels):
+        labels[0] ^= 1
+    pos = [s for s, l in zip(scores, labels) if l]
+    neg = [s for s, l in zip(scores, labels) if not l]
+    wins = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
+    assert abs(auc(scores, labels) - wins / (len(pos) * len(neg))) < 1e-9

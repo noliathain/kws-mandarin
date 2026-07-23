@@ -95,6 +95,47 @@ def frr_at_fah(scores, labels, durations, target_fah: float) -> OperatingPoint:
     )
 
 
+def eer(scores, labels) -> float:
+    """Equal error rate — the point where false-reject rate equals false-accept rate.
+
+    The open-vocab KWS field reports EER on LibriPhrase (and AUC), so this is what makes our
+    numbers comparable to that literature. Threshold-free: no FAH budget, just the crossover of
+    the two error curves swept over all thresholds.
+    """
+    scores, labels, _ = _as_arrays(scores, labels, [1.0] * len(labels))
+    pos = np.sort(scores[labels])
+    neg = np.sort(scores[~labels])
+    if len(pos) == 0 or len(neg) == 0:
+        raise ValueError("EER needs both positive and negative trials")
+    uniq = np.unique(scores)
+    thr = np.concatenate(([uniq[0] - 1.0], (uniq[:-1] + uniq[1:]) / 2.0, [uniq[-1] + 1.0]))
+    frr = np.searchsorted(pos, thr, side="left") / len(pos)          # miss rate
+    far = (len(neg) - np.searchsorted(neg, thr, side="left")) / len(neg)  # false-accept rate
+    # EER = frr where |frr - far| is minimized; average the two for the standard definition.
+    i = int(np.argmin(np.abs(frr - far)))
+    return float((frr[i] + far[i]) / 2.0)
+
+
+def auc(scores, labels) -> float:
+    """Area under the ROC curve via the rank-sum (Mann-Whitney U) identity — ties count 0.5."""
+    scores, labels, _ = _as_arrays(scores, labels, [1.0] * len(labels))
+    pos = scores[labels]
+    neg = scores[~labels]
+    if len(pos) == 0 or len(neg) == 0:
+        raise ValueError("AUC needs both positive and negative trials")
+    order = np.argsort(np.concatenate([neg, pos]), kind="mergesort")
+    ranks = np.empty(len(order), dtype=np.float64)
+    ranks[order] = np.arange(1, len(order) + 1)
+    # average ranks for ties so AUC=0.5 on random/degenerate scores
+    s = np.concatenate([neg, pos])
+    _, inv, cnt = np.unique(s, return_inverse=True, return_counts=True)
+    tie_rank = np.zeros(len(cnt))
+    np.add.at(tie_rank, inv, ranks)
+    ranks = (tie_rank / cnt)[inv]
+    r_pos = ranks[len(neg):].sum()
+    return float((r_pos - len(pos) * (len(pos) + 1) / 2.0) / (len(pos) * len(neg)))
+
+
 def summary(scores, labels, durations, target_fahs=(0.5, 1.0, 2.0)) -> dict[float, OperatingPoint]:
     """FRR at a set of FAH operating points — the standard KWS report line."""
     return {t: frr_at_fah(scores, labels, durations, t) for t in target_fahs}
