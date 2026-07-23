@@ -91,7 +91,7 @@ def test_corrupt_fn_hook_changes_only_the_audio_path(tmp_path):
     # ignored, or applied when None, the robustness curve would be meaningless.
     import soundfile as sf
 
-    from kws_mandarin.data import Utterance, write_manifest
+    from kws_mandarin.data import Utterance
     from kws_mandarin.models import KWSModel
     from kws_mandarin.tokenizer import PinyinTokenizer
     from kws_mandarin.train.validate_kws import run_validation
@@ -105,16 +105,23 @@ def test_corrupt_fn_hook_changes_only_the_audio_path(tmp_path):
     model = KWSModel(vocab_size=tok.vocab_size, scale=1.5).eval()
     dev = torch.device("cpu")
 
+    # Capture exactly what the model is fed, so we can prove the corrupted audio — not the clean
+    # audio — reaches it. (Asserting on TER would be flaky: an untrained model's greedy output
+    # barely depends on its input, so corruption need not move the metric.)
+    real_forward = model.forward
     seen = {}
-    def spy(wavs, lengths):
-        seen["called"] = True
-        return wavs + torch.randn_like(wavs) * 5.0    # wreck the signal
+    def capture(wav, lengths=None):
+        seen["mean"] = float(wav.mean())
+        return real_forward(wav, lengths)
+    model.forward = capture
 
-    clean = run_validation(model, utts, tok, ["你好"], dev, max_utts=6, corrupt_fn=None)
-    noisy = run_validation(model, utts, tok, ["你好"], dev, max_utts=6, corrupt_fn=spy)
-    assert seen.get("called"), "corrupt_fn was never invoked"
-    # heavy corruption must move the token error rate; identical TER would mean the hook did nothing
-    assert clean["ter"] != noisy["ter"]
+    run_validation(model, utts, tok, ["你好"], dev, max_utts=6, corrupt_fn=None)
+    clean_mean = seen["mean"]
+    run_validation(model, utts, tok, ["你好"], dev, max_utts=6,
+                   corrupt_fn=lambda w, l: w + 3.0)      # a provable, known shift
+    shifted_mean = seen["mean"]
+    # the model must have seen audio ~3.0 higher on average: the hook fed it the corrupted batch
+    assert abs((shifted_mean - clean_mean) - 3.0) < 0.05
 
 
 def test_snr_corrupt_fn_hits_target_snr():
