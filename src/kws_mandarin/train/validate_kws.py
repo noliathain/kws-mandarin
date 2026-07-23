@@ -70,7 +70,11 @@ def run_validation(
     target_fahs: tuple[float, ...] = (0.5, 1.0),
     use_ntc: bool = False,
     ntc_lambda: float = 2.0,
+    corrupt_fn=None,
 ) -> dict:
+    # corrupt_fn(wavs, lengths) -> wavs applies a waveform corruption (e.g. additive noise at a
+    # fixed SNR) to each batch before the model, so the SAME validation path can be run clean or
+    # under noise. None = clean.
     model.eval()
     blank = tokenizer.blank_id
     spotter = (
@@ -94,6 +98,8 @@ def run_validation(
         for i, w in enumerate(wavs):
             batch[i, : w.numel()] = w.to(device)
 
+        if corrupt_fn is not None:
+            batch = corrupt_fn(batch, lengths)       # additive noise at a fixed SNR, etc.
         logits = model(batch, lengths)               # (B, T, V) — masked CMVN
         log_probs = logits.log_softmax(-1)
         out_lens = model.output_lengths(lengths)     # (B,) on CPU

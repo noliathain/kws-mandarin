@@ -1,0 +1,45 @@
+{
+  "ckpt": "/teamspace/lightning_storage/kws-mandarin/checkpoints/sweep_s20/best.pt",
+  "scale": 20.0,
+  "noise_pack": "/teamspace/lightning_storage/kws-mandarin/musan.pt",
+  "weights": "ema",
+  "max_utts": 500,
+  "rows": [
+    {
+      "snr": "clean",
+      "ter": 0.2879,
+      "frr@0.5": 0.5167,
+      "frr@1.0": 0.2167
+    },
+    {
+      "snr": 20.0,
+      "ter": 0.3281,
+      "frr@0.5": 0.4667,
+      "frr@1.0": 0.3167
+    },
+    {
+      "snr": 15.0,
+      "ter": 0.3568,
+      "frr@0.5": 0.3667,
+      "frr@1.0": 0.3333
+    },
+    {
+      "snr": 10.0,
+      "ter": 0.3925,
+      "frr@0.5": 0.6,
+      "frr@1.0": 0.4333
+    },
+    {
+      "snr": 5.0,
+      "ter": 0.4575,
+      "frr@0.5": 0.5333,
+      "frr@1.0": 0.5333
+    },
+    {
+      "snr": 0.0,
+      "ter": 0.5619,
+      "frr@0.5": 0.65,
+      "frr@1.0": 0.6
+    }
+  ]
+}
