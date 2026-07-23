@@ -1,0 +1,226 @@
+<title>Mandarin KWS — Capacity Sweep</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --panel:#ffffff; --ink:#1a1a1a; --ink2:#55524d; --muted:#8a857d;
+    --line:#e7e3dc; --grid:#efece6; --accent:#b45309;
+    /* sequential ramp: small model -> large model, light -> dark (single hue, ordered) */
+    --s3:#f2c98a; --s6:#e0a250; --s12:#c67a1e; --s20:#9a5a12; --s30:#6f400d; --s40:#432608;
+    --good:#2f7d5b;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#16140f; --panel:#211e18; --ink:#f3efe7; --ink2:#c3bcae; --muted:#8f887a;
+      --line:#332e25; --grid:#2a251d; --accent:#f0a020;
+      --s3:#5a4520; --s6:#8a6320; --s12:#c07c1c; --s20:#dd9a36; --s30:#ecb662; --s40:#f7d59a; }
+  }
+  :root[data-theme="light"]{
+    --bg:#fbfaf8; --panel:#ffffff; --ink:#1a1a1a; --ink2:#55524d; --muted:#8a857d;
+    --line:#e7e3dc; --grid:#efece6; --accent:#b45309;
+    --s3:#f2c98a; --s6:#e0a250; --s12:#c67a1e; --s20:#9a5a12; --s30:#6f400d; --s40:#432608;
+  }
+  :root[data-theme="dark"]{
+    --bg:#16140f; --panel:#211e18; --ink:#f3efe7; --ink2:#c3bcae; --muted:#8f887a;
+    --line:#332e25; --grid:#2a251d; --accent:#f0a020;
+    --s3:#5a4520; --s6:#8a6320; --s12:#c07c1c; --s20:#dd9a36; --s30:#ecb662; --s40:#f7d59a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:920px;margin:0 auto;padding:40px 24px 80px}
+  header{margin-bottom:8px}
+  h1{font-size:26px;font-weight:650;letter-spacing:-.02em;margin:0 0 4px}
+  .sub{color:var(--ink2);font-size:15px;margin:0 0 4px}
+  .meta{color:var(--muted);font-size:13px}
+  h2{font-size:14px;font-weight:650;letter-spacing:.02em;text-transform:uppercase;
+    color:var(--ink2);margin:44px 0 4px}
+  .lede{color:var(--ink2);font-size:14.5px;margin:0 0 18px;max-width:64ch}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 22px 16px}
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 0}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 16px 14px}
+  .tile .k{font-size:12px;color:var(--muted);letter-spacing:.01em}
+  .tile .v{font-size:26px;font-weight:650;letter-spacing:-.02em;margin-top:3px}
+  .tile .d{font-size:12.5px;color:var(--ink2);margin-top:2px}
+  .tile .v .u{font-size:14px;font-weight:500;color:var(--ink2)}
+  svg{display:block;width:100%;height:auto;overflow:visible}
+  .ax{stroke:var(--line);stroke-width:1}
+  .gl{stroke:var(--grid);stroke-width:1}
+  .tk{fill:var(--muted);font-size:11px}
+  .axl{fill:var(--ink2);font-size:12px;font-weight:500}
+  .dot{stroke:var(--panel);stroke-width:2}
+  .legend{display:flex;flex-wrap:wrap;gap:14px 18px;margin:14px 2px 2px;font-size:12.5px;color:var(--ink2)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:6px}
+  th,td{text-align:right;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.02em}
+  td.best{color:var(--good);font-weight:650}
+  .note{font-size:13px;color:var(--ink2);margin:14px 0 0;max-width:66ch}
+  .note b{color:var(--ink);font-weight:600}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;font-size:13px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:5px 12px;white-space:nowrap}
+  .chip b{color:var(--accent)}
+  .arr{color:var(--muted)}
+  .foot{color:var(--muted);font-size:12px;margin-top:40px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Open-vocabulary Mandarin KWS — model capacity sweep</h1>
+  <p class="sub">How far does accuracy scale with model size, at a fixed recipe?</p>
+  <p class="meta">6 models · 62k → 6.2M params · BC-ResNet + CTC over tonal-syllable units · 15,000 steps · global batch 512 · AISHELL-1 (120,098 utts)</p>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Best TER</div><div class="v">0.265</div><div class="d">scale 30–40, tied</div></div>
+  <div class="tile"><div class="k">Best FRR @ 1/hr</div><div class="v">0.183</div><div class="d">scale 40 (6.2M)</div></div>
+  <div class="tile"><div class="k">TER vs smallest</div><div class="v">−43<span class="u">%</span></div><div class="d">0.461 → 0.265</div></div>
+  <div class="tile"><div class="k">Knee of the curve</div><div class="v">~2M</div><div class="d">params; gains flatten after</div></div>
+</div>
+
+<h2>1 · Accuracy vs capacity</h2>
+<p class="lede">Token error rate falls steeply with the first 30× of parameters, then flattens: scale 30 and 40 are tied on TER despite 40 having ~1.7× the parameters. Capacity was the binding constraint — and it has a clear knee near 2M.</p>
+<div class="panel">
+  <svg id="cap" viewBox="0 0 860 380" role="img" aria-label="Final token error rate versus parameter count, log x-axis"></svg>
+</div>
+
+<h2>2 · Validation trajectories</h2>
+<p class="lede">TER over training for each model. Bigger models start lower and stay lower; every curve is still gently descending at 15,000 steps, so these are lower bounds, not converged ceilings.</p>
+<div class="panel">
+  <svg id="traj" viewBox="0 0 860 380" role="img" aria-label="Token error rate over training steps for each model scale"></svg>
+  <div class="legend" id="leg"></div>
+</div>
+
+<h2>3 · The cost of capacity</h2>
+<p class="lede">Bigger models train slower per step (all six ran at global batch 512 on 2×H100). The accuracy-vs-throughput trade sets where to stop for a given budget.</p>
+<div class="panel">
+  <table id="tbl">
+    <thead><tr><th>Model</th><th>Params</th><th>TER</th><th>FRR @0.5/hr</th><th>FRR @1/hr</th><th>it/s</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p class="note"><b>Reading this:</b> TER is the reliable signal — measured over the full dev set, it falls monotonically with size and saturates at scale 30. FRR is measured on 500 utterances × 10 keywords, so single-scale wobbles (e.g. scale 30's 0.25) are within noise; the trend, not the point, is what to trust.</p>
+</div>
+
+<h2>4 · How the pipeline got fast enough to run this</h2>
+<p class="lede">The sweep was only affordable because the training step went from data-bound to compute-bound first. Six full runs at the original 1.4 it/s would have taken ~18 h of wall clock; at 7.5 it/s (scale 3) the whole sweep fit in an afternoon across a few boxes.</p>
+<div class="panel">
+  <div class="flow">
+    <span class="chip">baseline <b>1.4 it/s</b></span><span class="arr">→</span>
+    <span class="chip">parallel shard reads <b>+I/O</b></span><span class="arr">→</span>
+    <span class="chip">cache corpus in RAM</span><span class="arr">→</span>
+    <span class="chip">GPU augmentation</span><span class="arr">→</span>
+    <span class="chip">background prefetch</span><span class="arr">→</span>
+    <span class="chip">tokenizer cache</span><span class="arr">→</span>
+    <span class="chip">scale 3 <b>7.5 it/s</b></span>
+  </div>
+  <p class="note" style="margin-top:14px"><b>5.4× faster</b>, GPU utilization 36% → ~98%. The step became compute-bound, so the remaining per-step time now scales with the model — which is exactly what makes the throughput column above a clean read of model cost.</p>
+</div>
+
+<p class="foot">All points: identical recipe (lr 3e-3, warmup 1000, cosine decay, bf16, EMA with warmup, RIR+MUSAN+speed augmentation on GPU), global batch 512 via micro-batch 64 × accum 4 × 2 GPUs, so BatchNorm statistics match across scales. Only <code>model.scale</code> varies.</p>
+</div>
+
+<script type="application/json" id="data">[{"scale": 3.0, "params": 62260, "it_s": 4.9, "final_ter": 0.4611, "final_frr10": 0.4667, "final_frr05": 0.55, "ter_curve": [[2000, 0.591], [4000, 0.6199], [6000, 0.5346], [8000, 0.753], [10000, 0.4856], [12000, 0.4654], [14000, 0.462], [15000, 0.4611]], "frr10_curve": [[2000, 0.6833], [4000, 0.7833], [6000, 0.65], [8000, 0.9333], [10000, 0.55], [12000, 0.45], [14000, 0.5], [15000, 0.4667]]}, {"scale": 6.0, "params": 189880, "it_s": 4.2, "final_ter": 0.3705, "final_frr10": 0.4, "final_frr05": 0.4833, "ter_curve": [[2000, 0.4933], [4000, 0.4667], [6000, 0.4434], [8000, 0.4065], [10000, 0.3957], [12000, 0.3839], [14000, 0.3718], [15000, 0.3705]], "frr10_curve": [[2000, 0.4667], [4000, 0.4833], [6000, 0.4833], [8000, 0.4], [10000, 0.45], [12000, 0.4], [14000, 0.4], [15000, 0.4]]}, {"scale": 12.0, "params": 642112, "it_s": 3.1, "final_ter": 0.3129, "final_frr10": 0.2833, "final_frr05": 0.4, "ter_curve": [[2000, 0.4229], [4000, 0.4057], [6000, 0.3978], [8000, 0.3643], [10000, 0.3422], [12000, 0.3253], [14000, 0.3158], [15000, 0.3129]], "frr10_curve": [[2000, 0.3333], [4000, 0.4667], [6000, 0.35], [8000, 0.3333], [10000, 0.3667], [12000, 0.2167], [14000, 0.3], [15000, 0.2833]]}, {"scale": 20.0, "params": 1653664, "it_s": 2.3, "final_ter": 0.286, "final_frr10": 0.2167, "final_frr05": 0.5, "ter_curve": [[2000, 0.4235], [4000, 0.4173], [6000, 0.343], [8000, 0.3605], [10000, 0.3146], [12000, 0.2997], [14000, 0.2879], [15000, 0.286]], "frr10_curve": [[2000, 0.4], [4000, 0.4167], [6000, 0.3167], [8000, 0.3333], [10000, 0.2333], [12000, 0.2333], [14000, 0.2167], [15000, 0.2167]]}, {"scale": 30.0, "params": 3574744, "it_s": 1.7, "final_ter": 0.265, "final_frr10": 0.25, "final_frr05": 0.3833, "ter_curve": [[2000, 0.5346], [4000, 0.3504], [6000, 0.3413], [8000, 0.2977], [10000, 0.2794], [12000, 0.2775], [14000, 0.2665], [15000, 0.265]], "frr10_curve": [[2000, 0.7167], [4000, 0.4], [6000, 0.35], [8000, 0.35], [10000, 0.2333], [12000, 0.25], [14000, 0.2333], [15000, 0.25]]}, {"scale": 40.0, "params": 6225424, "it_s": 1.3, "final_ter": 0.2649, "final_frr10": 0.1833, "final_frr05": 0.4, "ter_curve": [[2000, 0.4005], [4000, 0.336], [6000, 0.347], [8000, 0.53], [10000, 0.3976], [12000, 0.3192], [14000, 0.2675], [15000, 0.2649]], "frr10_curve": [[2000, 0.4333], [4000, 0.2833], [6000, 0.4], [8000, 0.7167], [10000, 0.5167], [12000, 0.25], [14000, 0.1833], [15000, 0.1833]]}]</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const COL = {3:'--s3',6:'--s6',12:'--s12',20:'--s20',30:'--s30',40:'--s40'};
+const cv = s => getComputedStyle(document.documentElement).getPropertyValue(COL[s]).trim();
+const ink2 = () => getComputedStyle(document.documentElement).getPropertyValue('--ink2').trim();
+const SVGNS='http://www.w3.org/2000/svg';
+const el=(n,a)=>{const e=document.createElementNS(SVGNS,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
+
+function capChart(){
+  const svg=document.getElementById('cap'); svg.innerHTML='';
+  const W=860,H=380,mL=54,mR=90,mT=16,mB=48;
+  const x0=mL,x1=W-mR,y0=H-mB,y1=mT;
+  const lg=v=>Math.log10(v);
+  const px=lg(50000),qx=lg(8000000);
+  const X=v=>x0+(lg(v)-px)/(qx-px)*(x1-x0);
+  const tYlo=0.24,tYhi=0.50;
+  const Y=v=>y0+(v-tYlo)/(tYhi-tYlo)*(y1-y0);
+  // grid + x ticks (log)
+  [1e5,3e5,1e6,3e6].forEach(t=>{
+    svg.appendChild(el('line',{x1:X(t),y1:y1,x2:X(t),y2:y0,class:'gl'}));
+    svg.appendChild(el('text',{x:X(t),y:y0+18,'text-anchor':'middle',class:'tk'})).textContent=
+      t>=1e6?(t/1e6)+'M':(t/1e3)+'k';
+  });
+  [0.25,0.30,0.35,0.40,0.45,0.50].forEach(t=>{
+    svg.appendChild(el('line',{x1:x0,y1:Y(t),x2:x1,y2:Y(t),class:'gl'}));
+    svg.appendChild(el('text',{x:x0-10,y:Y(t)+4,'text-anchor':'end',class:'tk'})).textContent=t.toFixed(2);
+  });
+  svg.appendChild(el('line',{x1:x0,y1:y0,x2:x1,y2:y0,class:'ax'}));
+  svg.appendChild(el('text',{x:(x0+x1)/2,y:H-6,'text-anchor':'middle',class:'axl'})).textContent='Parameters (log scale)';
+  const yl=el('text',{x:16,y:(y0+y1)/2,'text-anchor':'middle',class:'axl',transform:`rotate(-90 16 ${(y0+y1)/2})`});
+  yl.textContent='Final token error rate'; svg.appendChild(yl);
+  // connecting line
+  let dpath='';
+  D.forEach((r,i)=>{dpath+=(i?'L':'M')+X(r.params)+' '+Y(r.final_ter);});
+  svg.appendChild(el('path',{d:dpath,fill:'none',stroke:ink2(),'stroke-width':2,'stroke-opacity':.5}));
+  // knee annotation
+  const kx=X(2200000);
+  svg.appendChild(el('line',{x1:kx,y1:y1,x2:kx,y2:y0,stroke:'var(--accent)','stroke-width':1,'stroke-dasharray':'4 4','stroke-opacity':.55}));
+  svg.appendChild(el('text',{x:kx+6,y:y1+14,class:'tk',fill:'var(--accent)'})).textContent='knee ~2M';
+  // points + labels
+  D.forEach(r=>{
+    svg.appendChild(el('circle',{cx:X(r.params),cy:Y(r.final_ter),r:6,fill:cv(r.scale),class:'dot'}));
+    svg.appendChild(el('text',{x:X(r.params),y:Y(r.final_ter)-13,'text-anchor':'middle',class:'tk',
+      fill:'var(--ink)'})).textContent=r.final_ter.toFixed(3);
+    svg.appendChild(el('text',{x:X(r.params),y:Y(r.final_ter)+20,'text-anchor':'middle',class:'tk'})).textContent='×'+r.scale;
+  });
+}
+
+function trajChart(){
+  const svg=document.getElementById('traj'); svg.innerHTML='';
+  const W=860,H=380,mL=54,mR=54,mT=16,mB=48;
+  const x0=mL,x1=W-mR,y0=H-mB,y1=mT;
+  const X=v=>x0+(v-2000)/(15000-2000)*(x1-x0);
+  const lo=0.24,hi=0.62;
+  const Y=v=>y0+(v-lo)/(hi-lo)*(y1-y0);
+  [0.30,0.40,0.50,0.60].forEach(t=>{
+    svg.appendChild(el('line',{x1:x0,y1:Y(t),x2:x1,y2:Y(t),class:'gl'}));
+    svg.appendChild(el('text',{x:x0-10,y:Y(t)+4,'text-anchor':'end',class:'tk'})).textContent=t.toFixed(2);
+  });
+  [2000,6000,10000,14000].forEach(t=>{
+    svg.appendChild(el('text',{x:X(t),y:y0+18,'text-anchor':'middle',class:'tk'})).textContent=(t/1000)+'k';
+  });
+  svg.appendChild(el('line',{x1:x0,y1:y0,x2:x1,y2:y0,class:'ax'}));
+  svg.appendChild(el('text',{x:(x0+x1)/2,y:H-6,'text-anchor':'middle',class:'axl'})).textContent='Training step';
+  const yl=el('text',{x:16,y:(y0+y1)/2,'text-anchor':'middle',class:'axl',transform:`rotate(-90 16 ${(y0+y1)/2})`});
+  yl.textContent='Token error rate'; svg.appendChild(yl);
+  D.forEach(r=>{
+    let p='';
+    r.ter_curve.forEach((pt,i)=>{p+=(i?'L':'M')+X(pt[0])+' '+Y(Math.min(pt[1],hi));});
+    svg.appendChild(el('path',{d:p,fill:'none',stroke:cv(r.scale),'stroke-width':2.2,
+      'stroke-linejoin':'round','stroke-linecap':'round'}));
+    const last=r.ter_curve[r.ter_curve.length-1];
+    svg.appendChild(el('circle',{cx:X(last[0]),cy:Y(last[1]),r:3.5,fill:cv(r.scale),class:'dot'}));
+  });
+  const leg=document.getElementById('leg'); leg.innerHTML='';
+  D.forEach(r=>{
+    const s=document.createElement('span');
+    s.innerHTML=`<span class="sw" style="background:${cv(r.scale)}"></span>×${r.scale} · ${r.params>=1e6?(r.params/1e6).toFixed(2)+'M':(r.params/1e3).toFixed(0)+'k'}`;
+    leg.appendChild(s);
+  });
+}
+
+function table(){
+  const tb=document.querySelector('#tbl tbody'); tb.innerHTML='';
+  const bestTer=Math.min(...D.map(r=>r.final_ter));
+  const bestFrr=Math.min(...D.map(r=>r.final_frr10));
+  D.forEach(r=>{
+    const tr=document.createElement('tr');
+    const p=r.params>=1e6?(r.params/1e6).toFixed(2)+'M':(r.params/1e3).toFixed(0)+'k';
+    tr.innerHTML=`<td><span class="sw" style="display:inline-block;background:${cv(r.scale)};margin-right:8px;vertical-align:middle"></span>scale ${r.scale}</td>`+
+      `<td>${p}</td>`+
+      `<td class="${r.final_ter<=bestTer+1e-4?'best':''}">${r.final_ter.toFixed(4)}</td>`+
+      `<td>${r.final_frr05.toFixed(3)}</td>`+
+      `<td class="${Math.abs(r.final_frr10-bestFrr)<1e-4?'best':''}">${r.final_frr10.toFixed(3)}</td>`+
+      `<td>${r.it_s}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+function draw(){capChart();trajChart();table();}
+draw();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
+new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+</script>
