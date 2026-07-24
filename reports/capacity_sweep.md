@@ -3,9 +3,10 @@
 **Question.** At a fixed training recipe, how far does keyword-spotting accuracy scale
 with model size — and where do the returns stop?
 
-**Answer.** Capacity was the binding constraint. Token error rate drops 43% over the first
-~30× of parameters, then saturates: scale 30 and scale 40 tie on TER despite scale 40 having
-1.7× the parameters. The knee of the curve sits near **2M parameters**.
+**Answer.** At a *fixed 15,000-step budget*, token error rate drops 43% over the first ~30× of
+parameters and then flattens. But that flattening turned out to be a **training-budget artifact,
+not a capacity ceiling**: retraining the 1.65M model for 60,000 steps reached **TER 0.2546**,
+beating the 6.2M model trained at 15k (0.2649). See "Longer training beats more parameters".
 
 An interactive version of these plots is in [`capacity_sweep.html`](capacity_sweep.html).
 
@@ -53,6 +54,31 @@ per hour, on 500 dev utts × 10 keywords.)
   not the point.
 - **Every curve is still descending at 15,000 steps.** These are lower bounds, not converged
   ceilings — a longer schedule shifts the whole curve down. The *shape* (the knee) should hold.
+
+## Longer training beats more parameters
+
+Every sweep curve was still descending at 15k steps, so the sweet-spot model (scale 20) was
+retrained for 60k steps — 4× the budget, identical recipe:
+
+| model | params | steps | TER |
+|---|---:|---:|---:|
+| scale 20 | 1.65M | 15,000 | 0.2860 |
+| scale 30 | 3.57M | 15,000 | 0.2650 |
+| scale 40 | 6.23M | 15,000 | 0.2649 |
+| **scale 20** | **1.65M** | **60,000** | **0.2546** |
+
+**Correction.** An earlier version of this report claimed TER "saturates near 2M params". That
+was confounded: at 15k steps none of the six models had converged, so the curve measured
+*convergence rate at a fixed budget*, not capacity. A 1.65M model given enough training beats a
+6.2M model that was not.
+
+**Still open.** What scale 30/40 reach at 60k. They may go lower, so this does not establish
+1.65M as optimal — only that the saturation claim does not hold as stated. The decisive
+experiment is scale 40 at 60k.
+
+**Implication.** The 60k run saw 256 epochs of the 150 h corpus and plateaued only at the end,
+with no overfitting. With training time no longer binding at this size, **data volume is the
+most promising untested axis** (AISHELL-2 1000 h or WenetSpeech-M 1000 h).
 
 ## Recommendation
 
